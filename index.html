@@ -121,7 +121,20 @@
     }
     return records;
   }
-  function periodFromFilename(fn){const m=fn.match(/(\d{4})-(\d{2})/);return m?`${m[1]}-${m[2]}`:fn;}
+  function periodFromFilename(fn){
+    let m=fn.match(/(\d{4})[-_年](\d{1,2})/);
+    if(m)return m[1]+"-"+String(m[2]).padStart(2,"0");
+    return fn;
+  }
+  function brandFromFilename(fn){
+    let s=fn.replace(/\.(xls|xlsx)$/i,"");
+    let m=s.match(/^([A-Za-z_'\-]+?)[\s_]*\d{4}/);
+    let brand=m?m[1]:s; brand=brand.replace(/_/g," ").replace(/\s+/g," ").trim();
+    if(/carter/i.test(brand))brand="Carter's";
+    return brand||"(未知品牌)";
+  }
+  window.brandFromFilename=brandFromFilename;
+  window.periodFromFilename=periodFromFilename;
   window.parseCartersWorkbook=function(arrayBuffer,filename){
     const period=periodFromFilename(filename);
     const wb=XLSX.read(arrayBuffer,{type:"array"});
@@ -172,151 +185,298 @@ function Login(){
       <p className="text-xs text-slate-400 text-center mt-4">帳號由管理員建立 · 忘記密碼請洽管理員</p>
     </Card></div>;
 }
-// ===== 總覽 =====
+// ===== 總覽(品牌彙總 + 解禁狀態)=====
 function Overview(){
   const [d,setD]=useState(null),[err,setErr]=useState("");
   useEffect(()=>{(async()=>{
     try{
-      const {data:bl,error:e1}=await sb.from('v_stock_by_brand_line').select('*');if(e1)throw e1;
+      const {data:bb,error:e1}=await sb.from('v_stock_by_brand').select('*');if(e1)throw e1;
       const {data:ps,error:e2}=await sb.from('product_sizes').select('total_qty');if(e2)throw e2;
       const {data:pg,error:e3}=await sb.from('products').select('grade,product_sizes(total_qty)');if(e3)throw e3;
+      const {data:batches,error:e4}=await sb.from('v_batches').select('*');if(e4)throw e4;
       const total=(ps||[]).reduce((s,r)=>s+r.total_qty,0);
       const active=(ps||[]).filter(r=>r.total_qty>0).length;
       let A=0,B=0;(pg||[]).forEach(p=>{const q=(p.product_sizes||[]).reduce((s,x)=>s+x.total_qty,0);if(p.grade==='A')A+=q;else B+=q;});
-      setD({byLine:(bl||[]).map(r=>({name:r.brand_line,value:r.total_qty})).sort((a,b)=>b.value-a.value),total,active,A,B});
+      setD({byBrand:(bb||[]).map(r=>({name:r.brand,value:r.total_qty,styles:r.style_count})).sort((a,b)=>b.value-a.value),
+        total,active,A,B,batches:batches||[]});
     }catch(e){setErr(e.message);}
   })();},[]);
   if(err)return <ErrBox msg={err}/>;if(!d)return <Loading/>;
-  const max=Math.max(1,...d.byLine.map(x=>x.value));
+  const max=Math.max(1,...d.byBrand.map(x=>x.value));
+  const today=new Date().toISOString().slice(0,10);
+  const sellable=d.batches.filter(b=>b.release_date&&b.release_date<=today);
+  const holding=d.batches.filter(b=>b.release_date&&b.release_date>today);
   const kpis=[['當前總庫存',fmt(d.total),'PCS','text-indigo-600'],['在庫尺碼數',fmt(d.active),'項','text-sky-600'],['A 品庫存',fmt(d.A),'PCS','text-emerald-600'],['B 品庫存',fmt(d.B),'PCS','text-amber-600']];
   return <div className="p-4 md:p-8 space-y-4 md:space-y-6">
     <div className="grid grid-cols-2 lg:grid-cols-4 gap-4 md:gap-6 fade-up">
       {kpis.map(([l,v,u,c])=><Card key={l} className="p-5 md:p-6"><div className="text-xs font-semibold text-slate-400 uppercase tracking-wide mb-3">{l}</div><div className="flex items-baseline gap-1.5"><span className={`font-mono font-extrabold text-2xl md:text-3xl ${c}`}>{v}</span><span className="text-sm text-slate-400">{u}</span></div></Card>)}
     </div>
-    <Card className="p-5 md:p-7"><h3 className="font-display font-bold mb-5">各產品線當前庫存</h3>
-      {d.byLine.length?<div className="space-y-2.5">{d.byLine.map((r,i)=><div key={i} className="flex items-center gap-3">
-        <div className="w-20 text-xs font-mono text-slate-500 shrink-0 text-right">{r.name}</div>
+    <Card className="p-5 md:p-7"><h3 className="font-display font-bold mb-5">各品牌庫存</h3>
+      {d.byBrand.length?<div className="space-y-2.5">{d.byBrand.map((r,i)=><div key={i} className="flex items-center gap-3">
+        <div className="w-24 text-xs font-semibold text-slate-600 shrink-0 text-right truncate">{r.name||'(未分品牌)'}</div>
         <div className="flex-1 bg-slate-100 rounded-full h-6 overflow-hidden"><div className="h-full bg-indigo-500 rounded-full flex items-center justify-end pr-2" style={{width:Math.max(6,r.value/max*100)+'%'}}><span className="text-xs font-mono font-semibold text-white">{fmt(r.value)}</span></div></div>
+        <div className="w-16 text-xs text-slate-400 shrink-0">{fmt(r.styles)}款</div>
       </div>)}</div>:<Empty msg="尚無資料,請先由管理員匯入 Excel"/>}</Card>
+    <div className="grid md:grid-cols-2 gap-4 md:gap-6">
+      <Card className="p-5 md:p-6"><h3 className="font-display font-bold mb-4 text-emerald-700">✓ 已解禁可販售 ({sellable.length})</h3>
+        {sellable.length?<div className="space-y-2 max-h-60 overflow-auto">{sellable.map((b,i)=><div key={i} className="flex justify-between text-sm border-b border-slate-50 pb-1.5"><span className="text-slate-600">{b.brand} · {b.period}</span><span className="font-mono">{fmt(b.total_qty)}件 <span className="text-emerald-600">解禁{b.release_date}</span></span></div>)}</div>:<Empty msg="目前無已解禁批次"/>}</Card>
+      <Card className="p-5 md:p-6"><h3 className="font-display font-bold mb-4 text-rose-600">⏳ 保留中 ({holding.length})</h3>
+        {holding.length?<div className="space-y-2 max-h-60 overflow-auto">{holding.map((b,i)=><div key={i} className="flex justify-between text-sm border-b border-slate-50 pb-1.5"><span className="text-slate-600">{b.brand} · {b.period}</span><span className="font-mono">{fmt(b.total_qty)}件 <span className="text-rose-500">至{b.release_date}</span></span></div>)}</div>:<Empty msg="目前無保留中批次"/>}</Card>
+    </div>
   </div>;
 }
 
-// ===== 庫存查詢 =====
+
+// ===== 庫存查詢(品牌/等級/檔名篩選 + 解禁顏色)=====
 function Inventory(){
-  const [rows,setRows]=useState(null),[err,setErr]=useState(""),[grade,setGrade]=useState(''),[q,setQ]=useState('');
+  const [rows,setRows]=useState(null),[err,setErr]=useState(""),[grade,setGrade]=useState(''),[brand,setBrand]=useState(''),[q,setQ]=useState(''),[fileq,setFileq]=useState('');
+  const [brands,setBrands]=useState([]);
+  useEffect(()=>{sb.from('v_stock_by_brand').select('brand').then(({data})=>setBrands((data||[]).map(b=>b.brand).filter(Boolean)));},[]);
   useEffect(()=>{const t=setTimeout(async()=>{setRows(null);
     try{
-      let query=sb.from('product_sizes').select('id,size_label,total_qty,products(style_no,part,color_code,color_desc,grade,brand_lines(canonical,brand))').gt('total_qty',0).order('total_qty',{ascending:false}).limit(500);
-      const {data,error}=await query;if(error)throw error;
-      let list=(data||[]).map(r=>({product_size_id:r.id,size_label:r.size_label,total_qty:r.total_qty,
-        style_no:r.products?.style_no,part:r.products?.part,color_code:r.products?.color_code,color_desc:r.products?.color_desc,grade:r.products?.grade,
-        brand_line:r.products?.brand_lines?.canonical,brand:r.products?.brand_lines?.brand}));
+      const {data,error}=await sb.from('v_inventory').select('*').gt('total_qty',0).order('total_qty',{ascending:false}).limit(800);
+      if(error)throw error;
+      let list=(data||[]);
       if(grade)list=list.filter(r=>r.grade===grade);
+      if(brand)list=list.filter(r=>r.brand===brand);
       if(q){const k=q.toLowerCase();list=list.filter(r=>(r.style_no||'').toLowerCase().includes(k)||(r.color_desc||'').toLowerCase().includes(k)||(r.color_code||'').toLowerCase().includes(k));}
+      if(fileq){const k=fileq.toLowerCase();list=list.filter(r=>(r.last_filename||'').toLowerCase().includes(k));}
       setRows(list);
     }catch(e){setErr(e.message);}
-  },300);return()=>clearTimeout(t);},[grade,q]);
+  },300);return()=>clearTimeout(t);},[grade,brand,q,fileq]);
   const sel="bg-white border border-slate-200 text-sm rounded-xl px-4 py-2.5 font-medium focus:ring-2 focus:ring-indigo-100 outline-none";
+  const today=new Date().toISOString().slice(0,10);
+  const relTag=(d)=>{if(!d)return <span className="text-slate-300">—</span>;const ok=d<=today;return <span className={`px-2 py-0.5 rounded text-xs font-semibold ${ok?'bg-emerald-100 text-emerald-700':'bg-rose-100 text-rose-600'}`}>{ok?'可販售':d}</span>;};
   return <div className="p-4 md:p-8"><Card className="overflow-hidden">
     <div className="p-4 md:p-6 border-b border-slate-100 flex flex-wrap gap-3 items-center">
+      <select className={sel} value={brand} onChange={e=>setBrand(e.target.value)}><option value="">全部品牌</option>{brands.map(b=><option key={b} value={b}>{b}</option>)}</select>
       <select className={sel} value={grade} onChange={e=>setGrade(e.target.value)}><option value="">A/B 品</option><option value="A">A 品</option><option value="B">B 品</option></select>
-      <input className={sel+" flex-1 min-w-[160px]"} placeholder="搜尋款號/顏色…" value={q} onChange={e=>setQ(e.target.value)}/>
+      <input className={sel+" flex-1 min-w-[140px]"} placeholder="搜尋款號/顏色…" value={q} onChange={e=>setQ(e.target.value)}/>
+      <input className={sel+" flex-1 min-w-[140px]"} placeholder="依檔名篩選…" value={fileq} onChange={e=>setFileq(e.target.value)}/>
       {rows&&<Pill tone="indigo">{fmt(rows.length)} 列</Pill>}
     </div>
     {err?<ErrBox msg={err}/>:!rows?<Loading/>:rows.length===0?<Empty msg="無符合資料"/>:
     <div className="overflow-auto" style={{maxHeight:540}}><table className="w-full">
-      <thead className="bg-slate-50/80 sticky top-0"><tr>{['款號','色號','顏色','產品線','等級','尺碼','件數'].map((h,i)=><th key={h} className={`px-4 py-3 text-xs font-semibold text-slate-400 uppercase ${i===6?'text-right':'text-left'}`}>{h}</th>)}</tr></thead>
+      <thead className="bg-slate-50/80 sticky top-0"><tr>{['品牌','款號','色號','顏色','產品線','等級','尺碼','解禁日','來源檔','件數'].map((h,i)=><th key={h} className={`px-4 py-3 text-xs font-semibold text-slate-400 uppercase ${i===9?'text-right':'text-left'}`}>{h}</th>)}</tr></thead>
       <tbody className="divide-y divide-slate-50">{rows.map((d,i)=><tr key={i} className="hover:bg-slate-50">
+        <td className="px-4 py-3 text-sm font-semibold text-slate-700">{d.brand||'—'}</td>
         <td className="px-4 py-3 font-mono font-semibold text-sm">{d.style_no}{d.part?<span className="text-slate-400">/{d.part}</span>:''}</td>
         <td className="px-4 py-3 font-mono text-sm text-indigo-600">{d.color_code}</td>
-        <td className="px-4 py-3 text-sm text-slate-500 max-w-[200px] truncate">{d.color_desc}</td>
+        <td className="px-4 py-3 text-sm text-slate-500 max-w-[160px] truncate">{d.color_desc}</td>
         <td className="px-4 py-3 font-mono text-sm text-slate-600">{d.brand_line}</td>
         <td className="px-4 py-3"><Pill tone={d.grade}>{d.grade} 品</Pill></td>
         <td className="px-4 py-3 font-mono text-sm">{d.size_label}</td>
+        <td className="px-4 py-3">{relTag(d.release_date)}</td>
+        <td className="px-4 py-3 text-xs text-slate-400 max-w-[160px] truncate" title={d.last_filename}>{d.last_filename||'—'}</td>
         <td className="px-4 py-3 font-mono font-semibold text-sm text-right">{fmt(d.total_qty)}</td></tr>)}</tbody>
     </table></div>}
   </Card></div>;
 }
 
+
 // ===== Excel 匯入(瀏覽器解析 → rpc_import_records)=====
 function ImportPage(){
-  const [busy,setBusy]=useState(false),[result,setResult]=useState(null),[err,setErr]=useState("");
+  const [stage,setStage]=useState('idle'); // idle|preview|done
+  const [busy,setBusy]=useState(false),[err,setErr]=useState("");
+  const [file,setFile]=useState(null),[recs,setRecs]=useState(null),[preview,setPreview]=useState(null);
+  const [brand,setBrand]=useState(""),[period,setPeriod]=useState(""),[release,setRelease]=useState("");
+  const [result,setResult]=useState(null);
   const onFile=async(e)=>{
     const f=e.target.files[0];if(!f)return;
-    setBusy(true);setErr("");setResult(null);
+    setBusy(true);setErr("");setResult(null);setStage('idle');
     try{
       const buf=await f.arrayBuffer();
-      const recs=window.parseCartersWorkbook(buf,f.name);
-      if(!recs.length)throw new Error("這個檔案解析不到資料,請確認是 CARTER'S 月度庫存格式");
-      const period=(f.name.match(/(\d{4})-(\d{2})/)||[])[0]||f.name;
-      const {data,error}=await sb.rpc('rpc_import_records',{p_filename:f.name,p_period:period,p_records:recs});
+      const r=window.parseCartersWorkbook(buf,f.name);
+      if(!r.length)throw new Error("這個檔案解析不到資料,請確認是月度庫存格式");
+      const {data,error}=await sb.rpc('rpc_import_preview',{p_records:r});
       if(error)throw error;
-      setResult(data);
+      setFile(f);setRecs(r);setPreview(data);
+      setBrand(window.brandFromFilename(f.name));
+      setPeriod(window.periodFromFilename(f.name));
+      setRelease("");
+      setStage('preview');
     }catch(ex){setErr(ex.message);}
     setBusy(false);e.target.value="";
   };
+  const commit=async()=>{
+    setBusy(true);setErr("");
+    try{
+      const {data,error}=await sb.rpc('rpc_import_commit',{
+        p_filename:file.name,p_brand:brand,p_period:period,
+        p_release_date:release||null,p_records:recs,p_expected_total:preview.total_qty});
+      if(error)throw error;
+      setResult(data);setStage('done');
+    }catch(ex){setErr(ex.message);}
+    setBusy(false);
+  };
+  const reset=()=>{setStage('idle');setFile(null);setRecs(null);setPreview(null);setResult(null);setErr("");};
+  const inp="bg-white border border-slate-200 text-sm rounded-xl px-4 py-2.5 font-medium focus:ring-2 focus:ring-indigo-100 outline-none w-full";
+
   return <div className="p-4 md:p-8"><Card className="p-6 md:p-8 max-w-2xl">
     <h3 className="font-display font-bold text-lg mb-2">上傳月度庫存 Excel</h3>
-    <p className="text-sm text-slate-500 mb-6">系統在瀏覽器直接解析並更新庫存:已有品項覆蓋為當月盤點值、新品項累計入庫、未列品項保留不動。</p>
-    <label className="block border-2 border-dashed border-slate-200 rounded-2xl p-10 text-center cursor-pointer hover:border-indigo-300 hover:bg-indigo-50/30 transition-colors">
+    <p className="text-sm text-slate-500 mb-6">流程:選檔解析 → 核對數量(雙重驗證) → 設定品牌與解禁日 → 確認入庫。</p>
+
+    {stage==='idle'&&<label className="block border-2 border-dashed border-slate-200 rounded-2xl p-10 text-center cursor-pointer hover:border-indigo-300 hover:bg-indigo-50/30 transition-colors">
       <input type="file" accept=".xls,.xlsx" onChange={onFile} className="hidden" disabled={busy}/>
-      {busy?<div className="flex flex-col items-center gap-3 text-indigo-600"><Spinner/><span className="text-sm font-semibold">解析並入庫中…</span></div>:
+      {busy?<div className="flex flex-col items-center gap-3 text-indigo-600"><Spinner/><span className="text-sm font-semibold">解析中…</span></div>:
       <div className="flex flex-col items-center gap-2 text-slate-500"><svg width="36" height="36" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.6"><path d="M12 16V4m0 0L8 8m4-4l4 4M4 20h16" strokeLinecap="round" strokeLinejoin="round"/></svg><span className="text-sm font-semibold">點擊選擇 .xls / .xlsx 檔案</span></div>}
-    </label>
-    {err&&<div className="mt-5 text-sm text-rose-600 bg-rose-50 rounded-xl px-4 py-3">{err}</div>}
-    {result&&<div className="mt-5 bg-emerald-50 rounded-xl p-5">
-      <div className="font-semibold text-emerald-800 mb-3">✅ 匯入成功 · {result.period}</div>
-      <div className="grid grid-cols-2 gap-3 text-sm">
-        <div><span className="text-slate-500">解析筆數</span><div className="font-mono font-bold">{fmt(result.parsed_rows)}</div></div>
-        <div><span className="text-slate-500">Excel 總量</span><div className="font-mono font-bold">{fmt(result.excel_total)}</div></div>
-        <div><span className="text-slate-500">新增累計</span><div className="font-mono font-bold text-emerald-600">{fmt(result.new_items)}</div></div>
-        <div><span className="text-slate-500">覆蓋更新</span><div className="font-mono font-bold text-indigo-600">{fmt(result.covered)}</div></div>
-        <div className="col-span-2 pt-2 border-t border-emerald-100"><span className="text-slate-500">系統當前總庫存</span><div className="font-mono font-extrabold text-lg">{fmt(result.system_total)}</div></div>
-      </div></div>}
+    </label>}
+
+    {stage==='preview'&&preview&&<div>
+      <div className="bg-amber-50 border border-amber-200 rounded-xl p-4 mb-4">
+        <div className="font-semibold text-amber-800 mb-1">⚠ 請核對數量(雙重驗證)</div>
+        <div className="text-sm text-amber-700">請對照你手上的 Excel,確認下列數字無誤再入庫。檔案:<span className="font-mono">{file.name}</span></div>
+      </div>
+      <div className="grid grid-cols-2 gap-3 mb-4">
+        <div><label className="text-xs font-semibold text-slate-500">品牌</label><input className={inp} value={brand} onChange={e=>setBrand(e.target.value)}/></div>
+        <div><label className="text-xs font-semibold text-slate-500">月份(淘汰月)</label><input className={inp} value={period} onChange={e=>setPeriod(e.target.value)}/></div>
+        <div className="col-span-2"><label className="text-xs font-semibold text-slate-500">解禁日(此日後可販售,可留空之後補)</label><input type="date" className={inp} value={release} onChange={e=>setRelease(e.target.value)}/></div>
+      </div>
+      <div className="bg-slate-50 rounded-xl p-4 mb-4">
+        <div className="flex justify-between text-sm mb-2"><span className="text-slate-500">解析總筆數</span><span className="font-mono font-bold">{fmt(preview.parsed_rows)} 筆</span></div>
+        <div className="flex justify-between text-sm mb-3"><span className="text-slate-500">總數量</span><span className="font-mono font-extrabold text-lg text-indigo-600">{fmt(preview.total_qty)} 件</span></div>
+        <div className="border-t border-slate-200 pt-2">
+          <div className="text-xs font-semibold text-slate-400 mb-1.5">各產品線明細</div>
+          <div className="space-y-1 max-h-48 overflow-auto">{preview.by_line.map((l,i)=><div key={i} className="flex justify-between text-sm"><span className="font-mono text-slate-600">{l.line}</span><span className="font-mono">{fmt(l.rows)}筆 / <b>{fmt(l.qty)}</b>件</span></div>)}</div>
+        </div>
+      </div>
+      {err&&<div className="mb-4 text-sm text-rose-600 bg-rose-50 rounded-xl px-4 py-3">{err}</div>}
+      <div className="flex gap-3">
+        <button onClick={reset} className="px-5 py-2.5 rounded-xl bg-slate-100 text-slate-600 font-semibold text-sm">取消</button>
+        <button onClick={commit} disabled={busy} className="flex-1 bg-indigo-600 hover:bg-indigo-700 text-white font-semibold py-2.5 rounded-xl disabled:opacity-60 flex items-center justify-center gap-2">{busy&&<Spinner/>}確認數量無誤,入庫</button>
+      </div>
+    </div>}
+
+    {stage==='done'&&result&&<div>
+      <div className="bg-emerald-50 rounded-xl p-5 mb-4">
+        <div className="font-semibold text-emerald-800 mb-3">✅ 匯入成功 · {result.brand} · {result.period}</div>
+        <div className="grid grid-cols-2 gap-3 text-sm">
+          <div><span className="text-slate-500">解析筆數</span><div className="font-mono font-bold">{fmt(result.parsed_rows)}</div></div>
+          <div><span className="text-slate-500">本批總量</span><div className="font-mono font-bold">{fmt(result.excel_total)}</div></div>
+          <div><span className="text-slate-500">新增累計</span><div className="font-mono font-bold text-emerald-600">{fmt(result.new_items)}</div></div>
+          <div><span className="text-slate-500">覆蓋更新</span><div className="font-mono font-bold text-indigo-600">{fmt(result.covered)}</div></div>
+          <div><span className="text-slate-500">解禁日</span><div className="font-mono font-bold">{result.release_date||'未設定'}</div></div>
+          <div><span className="text-slate-500">系統總庫存</span><div className="font-mono font-extrabold text-lg">{fmt(result.system_total)}</div></div>
+        </div>
+      </div>
+      <button onClick={reset} className="w-full bg-slate-900 text-white font-semibold py-2.5 rounded-xl">再上傳一個檔案</button>
+    </div>}
+
+    {stage==='idle'&&err&&<div className="mt-5 text-sm text-rose-600 bg-rose-50 rounded-xl px-4 py-3">{err}</div>}
   </Card></div>;
 }
 
-// ===== 入庫/出庫 =====
+
+// ===== 入庫/出庫(表單式,防誤觸)=====
 function Move(){
-  const [rows,setRows]=useState(null),[err,setErr]=useState(""),[q,setQ]=useState(''),[n,setN]=useState(1),[msg,setMsg]=useState(null);
+  const [rows,setRows]=useState(null),[err,setErr]=useState(""),[q,setQ]=useState(''),[msg,setMsg]=useState(null);
+  const [modal,setModal]=useState(null); // {row, action}
+  const [qty,setQty]=useState(""),[note,setNote]=useState(""),[busy,setBusy]=useState(false);
   const load=async()=>{try{
-    let query=sb.from('product_sizes').select('id,size_label,total_qty,products(style_no,part,color_desc,grade)').order('total_qty',{ascending:false}).limit(80);
+    let query=sb.from('v_inventory').select('product_size_id,size_label,total_qty,style_no,part,color_desc,grade,brand,release_date').order('total_qty',{ascending:false}).limit(100);
     const {data,error}=await query;if(error)throw error;
-    let list=(data||[]).map(r=>({product_size_id:r.id,size_label:r.size_label,total_qty:r.total_qty,style_no:r.products?.style_no,part:r.products?.part,color_desc:r.products?.color_desc,grade:r.products?.grade}));
+    let list=(data||[]);
     if(q){const k=q.toLowerCase();list=list.filter(r=>(r.style_no||'').toLowerCase().includes(k)||(r.color_desc||'').toLowerCase().includes(k));}
     setRows(list);
   }catch(e){setErr(e.message);}};
   useEffect(()=>{const t=setTimeout(load,300);return()=>clearTimeout(t);},[q]);
   const showMsg=(m,ok)=>{setMsg({m,ok});setTimeout(()=>setMsg(null),3000);};
-  const doMove=async(row,action)=>{try{
-    if(action==='OUT'){const {data,error}=await sb.rpc('rpc_stock_out',{p_product_size_id:row.product_size_id,p_qty:n});if(error)throw error;showMsg(`出庫成功 · 剩餘 ${data}`,true);}
-    else{const {error}=await sb.from('stock_movements').insert({product_size_id:row.product_size_id,action:'IN',delta_qty:n,note:'手動入庫'});if(error)throw error;showMsg(`入庫成功 · +${n}`,true);}
-    load();
-  }catch(e){showMsg(e.message,false);}};
+  const openModal=(row,action)=>{setModal({row,action});setQty("");setNote("");setErr("");};
+  const submit=async()=>{
+    const n=parseInt(qty);
+    if(!n||n<=0){showMsg("請輸入大於 0 的數量",false);return;}
+    setBusy(true);
+    try{
+      if(modal.action==='OUT'){const {data,error}=await sb.rpc('rpc_stock_out',{p_product_size_id:modal.row.product_size_id,p_qty:n,p_note:note||null});if(error)throw error;showMsg(`出庫成功 · 剩餘 ${data}`,true);}
+      else{const {data,error}=await sb.rpc('rpc_stock_in',{p_product_size_id:modal.row.product_size_id,p_qty:n,p_note:note||null});if(error)throw error;showMsg(`入庫成功 · 現有 ${data}`,true);}
+      setModal(null);load();
+    }catch(e){showMsg(e.message,false);}
+    setBusy(false);
+  };
   const sel="bg-white border border-slate-200 text-sm rounded-xl px-4 py-2.5 font-medium focus:ring-2 focus:ring-indigo-100 outline-none";
+  const today=new Date().toISOString().slice(0,10);
+  const relTag=(d)=>{if(!d)return null;const ok=d<=today;return <span className={`ml-1 px-1.5 py-0.5 rounded text-[10px] font-semibold ${ok?'bg-emerald-100 text-emerald-700':'bg-rose-100 text-rose-600'}`}>{ok?'可售':'保留至'+d}</span>;};
   return <div className="p-4 md:p-8"><Card className="overflow-hidden">
     <div className="p-4 md:p-6 border-b border-slate-100 flex flex-wrap gap-3 items-center">
       <input className={sel+" flex-1 min-w-[200px]"} placeholder="搜尋款號/顏色定位品項…" value={q} onChange={e=>setQ(e.target.value)}/>
-      <div className="flex items-center gap-2"><span className="text-sm text-slate-400">數量</span><input type="number" min="1" value={n} onChange={e=>setN(Math.max(1,+e.target.value||1))} className={sel+" w-24 font-mono"}/></div>
+      <span className="text-xs text-slate-400">點品項的按鈕會跳出表單確認,避免誤觸</span>
     </div>
-    {err?<ErrBox msg={err}/>:!rows?<Loading/>:
+    {err&&!modal?<ErrBox msg={err}/>:!rows?<Loading/>:
     <div className="overflow-auto" style={{maxHeight:520}}><table className="w-full">
-      <thead className="bg-slate-50/80 sticky top-0"><tr>{['款號','顏色','尺碼','等級','現有','操作'].map((h,i)=><th key={h} className={`px-4 py-3 text-xs font-semibold text-slate-400 uppercase ${i>=4?'text-right':'text-left'}`}>{h}</th>)}</tr></thead>
+      <thead className="bg-slate-50/80 sticky top-0"><tr>{['款號','顏色','尺碼','等級','解禁','現有','操作'].map((h,i)=><th key={h} className={`px-4 py-3 text-xs font-semibold text-slate-400 uppercase ${i>=5?'text-right':'text-left'}`}>{h}</th>)}</tr></thead>
       <tbody className="divide-y divide-slate-50">{rows.map((d,i)=><tr key={i} className="hover:bg-slate-50">
         <td className="px-4 py-3 font-mono font-semibold text-sm">{d.style_no}{d.part?'/'+d.part:''}</td>
-        <td className="px-4 py-3 text-sm text-slate-500 max-w-[180px] truncate">{d.color_desc}</td>
+        <td className="px-4 py-3 text-sm text-slate-500 max-w-[160px] truncate">{d.color_desc}</td>
         <td className="px-4 py-3 font-mono text-sm">{d.size_label}</td>
         <td className="px-4 py-3"><Pill tone={d.grade}>{d.grade}</Pill></td>
+        <td className="px-4 py-3 text-xs">{relTag(d.release_date)||<span className="text-slate-300">—</span>}</td>
         <td className={`px-4 py-3 font-mono font-semibold text-sm text-right ${d.total_qty<=5?'text-rose-500':''}`}>{fmt(d.total_qty)}</td>
         <td className="px-4 py-3 text-right whitespace-nowrap">
-          <button onClick={()=>doMove(d,'IN')} className="px-3 py-1.5 rounded-lg bg-emerald-50 text-emerald-700 hover:bg-emerald-100 text-sm font-semibold mr-2">＋入庫</button>
-          <button onClick={()=>doMove(d,'OUT')} className="px-3 py-1.5 rounded-lg bg-rose-50 text-rose-600 hover:bg-rose-100 text-sm font-semibold">－出庫</button>
+          <button onClick={()=>openModal(d,'IN')} className="px-3 py-1.5 rounded-lg bg-emerald-50 text-emerald-700 hover:bg-emerald-100 text-sm font-semibold mr-2">入庫</button>
+          <button onClick={()=>openModal(d,'OUT')} className="px-3 py-1.5 rounded-lg bg-rose-50 text-rose-600 hover:bg-rose-100 text-sm font-semibold">出庫</button>
         </td></tr>)}</tbody>
     </table></div>}
   </Card>
+  {modal&&<div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4" onClick={()=>!busy&&setModal(null)}>
+    <Card className="w-full max-w-md p-6" >
+      <div onClick={e=>e.stopPropagation()}>
+      <h3 className="font-display font-bold text-lg mb-1">{modal.action==='OUT'?'出庫':'入庫'}登記</h3>
+      <div className="text-sm text-slate-500 mb-4 font-mono">{modal.row.style_no}{modal.row.part?'/'+modal.row.part:''} · {modal.row.size_label} · 現有 {fmt(modal.row.total_qty)}</div>
+      {modal.action==='OUT'&&modal.row.release_date&&modal.row.release_date>today&&<div className="mb-4 text-sm text-rose-600 bg-rose-50 rounded-lg px-3 py-2">⚠ 此批保留至 {modal.row.release_date},尚未解禁。仍可出庫但請留意合約。</div>}
+      <label className="block text-sm font-semibold text-slate-600 mb-1.5">數量</label>
+      <input autoFocus type="number" min="1" value={qty} onChange={e=>setQty(e.target.value)} onKeyDown={e=>e.key==='Enter'&&submit()} className={sel+" w-full mb-4 font-mono"} placeholder="輸入數量"/>
+      <label className="block text-sm font-semibold text-slate-600 mb-1.5">備註(選填)</label>
+      <input value={note} onChange={e=>setNote(e.target.value)} className={sel+" w-full mb-5"} placeholder="原因/單號…"/>
+      <div className="flex gap-3">
+        <button onClick={()=>setModal(null)} disabled={busy} className="px-5 py-2.5 rounded-xl bg-slate-100 text-slate-600 font-semibold text-sm">取消</button>
+        <button onClick={submit} disabled={busy} className={`flex-1 text-white font-semibold py-2.5 rounded-xl disabled:opacity-60 flex items-center justify-center gap-2 ${modal.action==='OUT'?'bg-rose-600 hover:bg-rose-700':'bg-emerald-600 hover:bg-emerald-700'}`}>{busy&&<Spinner/>}確認{modal.action==='OUT'?'出庫':'入庫'}</button>
+      </div>
+      </div>
+    </Card>
+  </div>}
   {msg&&<div className={`fixed bottom-20 md:bottom-8 left-1/2 -translate-x-1/2 z-50 px-6 py-3.5 rounded-2xl text-sm font-semibold shadow-lg ${msg.ok?'bg-slate-900 text-white':'bg-rose-600 text-white'}`}>{msg.m}</div>}
   </div>;
 }
+
+
+// ===== 異動歷史 =====
+function History(){
+  const [rows,setRows]=useState(null),[err,setErr]=useState(""),[q,setQ]=useState(''),[act,setAct]=useState('');
+  useEffect(()=>{const t=setTimeout(async()=>{setRows(null);
+    try{
+      const {data,error}=await sb.from('v_movement_history').select('*').limit(300);
+      if(error)throw error;
+      let list=(data||[]);
+      if(act)list=list.filter(r=>r.action===act);
+      if(q){const k=q.toLowerCase();list=list.filter(r=>(r.style_no||'').toLowerCase().includes(k)||(r.brand||'').toLowerCase().includes(k));}
+      setRows(list);
+    }catch(e){setErr(e.message);}
+  },300);return()=>clearTimeout(t);},[q,act]);
+  const sel="bg-white border border-slate-200 text-sm rounded-xl px-4 py-2.5 font-medium focus:ring-2 focus:ring-indigo-100 outline-none";
+  const actTag=(a)=>{const m={IN:['入庫','bg-emerald-100 text-emerald-700'],OUT:['出庫','bg-rose-100 text-rose-600'],ADJUST:['盤點調整','bg-indigo-100 text-indigo-700']};const x=m[a]||['?','bg-slate-100'];return <span className={`px-2 py-0.5 rounded text-xs font-semibold ${x[1]}`}>{x[0]}</span>;};
+  const dt=(s)=>{try{return new Date(s).toLocaleString('zh-TW',{month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit'});}catch{return s;}};
+  return <div className="p-4 md:p-8"><Card className="overflow-hidden">
+    <div className="p-4 md:p-6 border-b border-slate-100 flex flex-wrap gap-3 items-center">
+      <select className={sel} value={act} onChange={e=>setAct(e.target.value)}><option value="">全部異動</option><option value="IN">入庫</option><option value="OUT">出庫</option><option value="ADJUST">盤點調整</option></select>
+      <input className={sel+" flex-1 min-w-[160px]"} placeholder="搜尋款號/品牌…" value={q} onChange={e=>setQ(e.target.value)}/>
+      {rows&&<Pill tone="indigo">{fmt(rows.length)} 筆</Pill>}
+    </div>
+    {err?<ErrBox msg={err}/>:!rows?<Loading/>:rows.length===0?<Empty msg="尚無異動紀錄"/>:
+    <div className="overflow-auto" style={{maxHeight:560}}><table className="w-full">
+      <thead className="bg-slate-50/80 sticky top-0"><tr>{['時間','異動','品牌','款號','尺碼','數量','異動後','備註'].map((h,i)=><th key={h} className={`px-4 py-3 text-xs font-semibold text-slate-400 uppercase ${(i===5||i===6)?'text-right':'text-left'}`}>{h}</th>)}</tr></thead>
+      <tbody className="divide-y divide-slate-50">{rows.map((d,i)=><tr key={i} className="hover:bg-slate-50">
+        <td className="px-4 py-3 text-xs text-slate-500 whitespace-nowrap">{dt(d.created_at)}</td>
+        <td className="px-4 py-3">{actTag(d.action)}</td>
+        <td className="px-4 py-3 text-sm">{d.brand||'—'}</td>
+        <td className="px-4 py-3 font-mono font-semibold text-sm">{d.style_no}{d.part?'/'+d.part:''}</td>
+        <td className="px-4 py-3 font-mono text-sm">{d.size_label}</td>
+        <td className={`px-4 py-3 font-mono font-semibold text-sm text-right ${d.delta_qty<0?'text-rose-500':'text-emerald-600'}`}>{d.delta_qty>0?'+':''}{fmt(d.delta_qty)}</td>
+        <td className="px-4 py-3 font-mono text-sm text-right text-slate-500">{fmt(d.balance_after)}</td>
+        <td className="px-4 py-3 text-xs text-slate-400 max-w-[180px] truncate" title={d.note}>{d.note}</td></tr>)}</tbody>
+    </table></div>}
+  </Card></div>;
+}
+
 
 // ===== 主應用 =====
 function App(){
@@ -329,9 +489,9 @@ function App(){
   if(!session)return <Login/>;
   if(!profile)return <div className="min-h-screen flex items-center justify-center"><Spinner/></div>;
   const role=profile.role;
-  const nav=[['overview','總覽','all'],['inventory','查詢','all'],['import','匯入','admin'],['move','入出庫','all']].filter(i=>i[2]==='all'||i[2]===role);
+  const nav=[['overview','總覽','all'],['inventory','查詢','all'],['import','匯入','admin'],['move','入出庫','all'],['history','歷史','all']].filter(i=>i[2]==='all'||i[2]===role);
   const safeTab=(tab==='import'&&role!=='admin')?'overview':tab;
-  const titles={overview:['總覽儀表板','即時掌握各品牌庫存'],inventory:['庫存查詢','多維度交叉篩選'],import:['Excel 匯入','上傳月度盤點自動更新庫存'],move:['入庫 / 出庫','FIFO 與庫存不足防呆']};
+  const titles={overview:['總覽儀表板','即時掌握各品牌庫存'],inventory:['庫存查詢','多維度交叉篩選'],import:['Excel 匯入','上傳月度盤點自動更新庫存'],move:['入庫 / 出庫','表單式登記,避免誤觸'],history:['異動歷史','所有入出庫與盤點紀錄']};
   return <div className="min-h-screen grain">
     <aside className="hidden md:flex fixed left-0 top-0 h-full w-64 bg-white border-r border-slate-100 flex-col z-20">
       <div className="px-6 py-7 flex items-center gap-3"><div className="w-10 h-10 rounded-xl bg-indigo-600 flex items-center justify-center"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="#fff" strokeWidth="2.2"><path d="M20 7l-8-4-8 4m16 0l-8 4m8-4v10l-8 4m0-10L4 7m8 4v10m0-10L4 7" strokeLinecap="round" strokeLinejoin="round"/></svg></div><div><div className="font-display font-extrabold text-lg leading-none">StockSense</div><div className="text-xs text-slate-400 mt-1">成衣倉儲管理</div></div></div>
@@ -342,7 +502,7 @@ function App(){
     <div className="md:ml-64 pb-20 md:pb-0">
       <header className="sticky top-0 z-10 backdrop-blur-md bg-white/80 border-b border-slate-100 px-4 md:px-8 py-4 md:py-5 flex items-center justify-between"><div><h1 className="font-display font-bold text-lg md:text-xl">{titles[safeTab][0]}</h1><p className="text-xs md:text-sm text-slate-500 mt-0.5">{titles[safeTab][1]}</p></div><button onClick={logout} className="md:hidden text-xs font-semibold text-rose-500">登出</button></header>
       <main className="fade-up" key={safeTab}>
-        {safeTab==='overview'&&<Overview/>}{safeTab==='inventory'&&<Inventory/>}{safeTab==='import'&&<ImportPage/>}{safeTab==='move'&&<Move/>}
+        {safeTab==='overview'&&<Overview/>}{safeTab==='inventory'&&<Inventory/>}{safeTab==='import'&&<ImportPage/>}{safeTab==='move'&&<Move/>}{safeTab==='history'&&<History/>}
       </main>
     </div>
   </div>;
