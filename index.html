@@ -1,0 +1,354 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>StockSense · 成衣倉儲管理</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js" crossorigin></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js" crossorigin></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.23.2/babel.min.js"></script>
+<script src="https://cdn.tailwindcss.com"></script>
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+<script src="https://cdn.sheetjs.com/xlsx-0.20.2/package/dist/xlsx.full.min.js"></script>
+<link href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;600;700;800&family=Sora:wght@600;700;800&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<style>
+  body{font-family:'Manrope',sans-serif;background:#f8fafc}
+  ::-webkit-scrollbar{width:9px;height:9px}::-webkit-scrollbar-thumb{background:#cbd5e1;border-radius:5px}
+  .grain{background-image:radial-gradient(circle at 1px 1px,#e2e8f0 1px,transparent 0);background-size:22px 22px}
+  .fade-up{animation:fadeUp .5s cubic-bezier(.16,1,.3,1) both}
+  @keyframes fadeUp{from{opacity:0;transform:translateY(12px)}to{opacity:1;transform:none}}
+  .spin{animation:spin 1s linear infinite}@keyframes spin{to{transform:rotate(360deg)}}
+  .font-display{font-family:'Sora',sans-serif}.font-mono{font-family:'JetBrains Mono',monospace}
+</style>
+</head>
+<body class="text-slate-900 antialiased">
+<div id="root"></div>
+
+<!-- ════════════════════════════════════════════════════════════════
+     ★★★ 部署前只需填這兩個值(方案B:前端直連 Supabase,不需後端)★★★
+     1. SUPABASE_URL : Supabase → Connect → App Frameworks → URL
+     2. SUPABASE_ANON: 同處的 publishable / anon key
+     ════════════════════════════════════════════════════════════════ -->
+<script>
+  window.CONFIG = {
+  SUPABASE_URL: "https://ylorxhjxbcxszrsylwjx.supabase.co",
+  SUPABASE_ANON: "sb_publishable_XMh7kRMg3ziakf6ptrn8Ag_XAsPqu6T",
+};
+</script>
+
+<!-- ===== CARTER'S 解析器(移植自已驗證的 Python 版,瀏覽器內解析)===== -->
+<script>
+(function(){
+  function clean(s){if(s==null)return "";s=String(s).replace(/\n/g," ").trim();return s.replace(/\s+/g," ");}
+  function toQty(v){
+    if(typeof v==="boolean")return null;
+    if(typeof v==="number")return v>0?Math.trunc(v):null;
+    const s=clean(v);
+    if(/^\d+(\.0+)?$/.test(s)){const n=Math.trunc(parseFloat(s));return n>0?n:null;}
+    return null;
+  }
+  function normStyle(s){
+    s=clean(s);let part="";
+    const m=s.match(/(上衣|裤子|褲子|頭巾)/);
+    if(m){part=m[1];if(part==="褲子")part="裤子";}
+    const main=s.replace(/\s*(上衣|裤子|褲子|頭巾)\s*/g,"").trim();
+    return [main,part];
+  }
+  function parseColor(raw){
+    const c=clean(raw);const m=c.match(/^([A-Z]{2,4}\d{1,3})\s*(.*)$/);
+    return [m?m[1]:"", m?m[2]:c];
+  }
+  function looksLikeSize(v){
+    let s=clean(v).toUpperCase();if(s==="")return false;
+    if(["NB","XS","S","M","L","XL","XXL","XXXL","PP","P"].includes(s))return true;
+    if(/^\d{1,3}M$/.test(s))return true;
+    if(/^\d[T]$/.test(s))return true;
+    if(/^\d{2,3}CM$/.test(s))return true;
+    if(/^\d{1,2}(\.0)?$/.test(s)){const n=Math.trunc(parseFloat(s));return n>=2&&n<=16;}
+    return false;
+  }
+  function cellVal(rows,r,c){if(r<0||r>=rows.length)return "";const row=rows[r];if(!row||c<0||c>=row.length)return "";const v=row[c];return v==null?"":v;}
+  function nrows(rows){return rows.length;}
+  function ncols(rows){return rows.reduce((m,r)=>Math.max(m,r?r.length:0),0);}
+  function findSizeHeader(rows){
+    let best=[null,{}];const lim=Math.min(6,nrows(rows));const nc=ncols(rows);
+    for(let r=0;r<lim;r++){const sizemap={};
+      for(let c=0;c<nc;c++){const v=cellVal(rows,r,c);
+        if(looksLikeSize(v)){let s=clean(v).toUpperCase();if(/^\d{1,2}(\.0)?$/.test(s))s=String(Math.trunc(parseFloat(s)));sizemap[c]=s;}}
+      if(Object.keys(sizemap).length>Object.keys(best[1]).length)best=[r,sizemap];
+    }
+    if(best[0]!==null&&Object.keys(best[1]).length>=2)return best;
+    return [null,{}];
+  }
+  function isASheet(name){return (name.includes("A品")||name.includes("A 品"))&&!name.includes("B品")&&!name.includes("B-品");}
+  function isBSheet(name){const n=name.trim();return n==="B品"||n==="B-品"||n.startsWith("B品")||n.startsWith("B-品");}
+  function lineCode(sheetName){
+    const n=clean(sheetName);const m=n.match(/^([A-Z]{2,4})/);let base=m?m[1]:n;let sub="";
+    if(n.includes("上衣"))sub="上衣";else if(n.includes("裤子")||n.includes("褲子"))sub="裤子";
+    return (base+sub).trim();
+  }
+  function parseASheet(rows,sheetName,period){
+    const [hdrRow,sizemap]=findSizeHeader(rows);
+    if(hdrRow===null||Object.keys(sizemap).length===0)return [];
+    const styleCol=3,colorCol=4;const records=[];const nc=ncols(rows);
+    for(let r=hdrRow+1;r<nrows(rows);r++){
+      let styleRaw=styleCol<nc?clean(cellVal(rows,r,styleCol)):"";
+      if(styleRaw.toUpperCase().startsWith("TTL"))continue;
+      if(clean(cellVal(rows,r,0)).toUpperCase().startsWith("TTL"))continue;
+      if(!styleRaw||!/[A-Z]{2,4}\d/.test(styleRaw))continue;
+      const [style,part]=normStyle(styleRaw);
+      const [cc,cd]=parseColor(colorCol<nc?cellVal(rows,r,colorCol):"");
+      for(const c in sizemap){const size=sizemap[c];const q=toQty(cellVal(rows,r,parseInt(c)));
+        if(q)records.push({period,line:lineCode(sheetName),grade:"A",style_no:style,part,color_code:cc,color_desc:cd,size,qty:q,brand:"Carter"});}
+    }
+    return records;
+  }
+  function parseBSheet(rows,period){
+    let hdr=null,cols=null;const lim=Math.min(5,nrows(rows));const nc=ncols(rows);
+    for(let r=0;r<lim;r++){const row=[];for(let c=0;c<nc;c++)row.push(clean(cellVal(rows,r,c)));
+      const j=row.join(" ");if(j.includes("款號")&&(j.includes("数量")||j.includes("數量"))){hdr=r;cols=row;break;}}
+    if(hdr===null)return [];
+    const colidx=(...keys)=>{for(let i=0;i<cols.length;i++)if(keys.some(k=>cols[i].includes(k)))return i;return null;};
+    const ciStyle=colidx("款號"),ciColor=colidx("顏色","顔色"),ciQty=colidx("数量","數量");
+    const records=[];
+    for(let r=hdr+1;r<nrows(rows);r++){
+      const styleRaw=ciStyle!==null?clean(cellVal(rows,r,ciStyle)):"";
+      if(!styleRaw||!/[A-Z]{2,4}\d/.test(styleRaw))continue;
+      const qty=ciQty!==null?toQty(cellVal(rows,r,ciQty)):null;if(!qty)continue;
+      const [cc,cd]=parseColor(ciColor!==null?cellVal(rows,r,ciColor):"");
+      const [bs,bp]=normStyle(styleRaw);
+      records.push({period,line:"B品",grade:"B",style_no:bs,part:bp,color_code:cc,color_desc:cd,size:"(未分尺碼)",qty,brand:"Carter"});
+    }
+    return records;
+  }
+  function periodFromFilename(fn){const m=fn.match(/(\d{4})-(\d{2})/);return m?`${m[1]}-${m[2]}`:fn;}
+  window.parseCartersWorkbook=function(arrayBuffer,filename){
+    const period=periodFromFilename(filename);
+    const wb=XLSX.read(arrayBuffer,{type:"array"});
+    let recs=[];
+    for(const name of wb.SheetNames){
+      const ws=wb.Sheets[name];
+      const rows=XLSX.utils.sheet_to_json(ws,{header:1,raw:true,defval:""});
+      if(isBSheet(name))recs=recs.concat(parseBSheet(rows,period));
+      else if(isASheet(name))recs=recs.concat(parseASheet(rows,name,period));
+    }
+    return recs;
+  };
+})();
+</script>
+
+<script type="text/babel">
+const {useState,useEffect,useMemo}=React;
+const fmt=n=>(n??0).toLocaleString('en-US');
+const sb=window.supabase.createClient(window.CONFIG.SUPABASE_URL,window.CONFIG.SUPABASE_ANON);
+
+const Pill=({children,tone})=>{const m={A:'bg-emerald-100 text-emerald-700',B:'bg-amber-100 text-amber-700',indigo:'bg-indigo-100 text-indigo-700',slate:'bg-slate-100 text-slate-600'};return <span className={`inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-semibold ${m[tone]||m.slate}`}>{children}</span>;};
+const Card=({children,className=''})=><div className={`bg-white rounded-2xl border border-slate-100 shadow-sm ${className}`}>{children}</div>;
+const Spinner=()=><svg className="spin" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"><path d="M21 12a9 9 0 11-6.219-8.56" strokeLinecap="round"/></svg>;
+const Loading=()=><div className="flex items-center justify-center py-20 text-slate-400 gap-3"><Spinner/>載入中…</div>;
+const ErrBox=({msg})=><div className="m-4 md:m-8 text-sm text-rose-600 bg-rose-50 rounded-xl px-4 py-3">⚠ {msg}</div>;
+const Empty=({msg})=><div className="text-center text-slate-400 py-12 text-sm">{msg}</div>;
+
+// ===== 登入頁 =====
+function Login(){
+  const [email,setEmail]=useState(""),[pw,setPw]=useState(""),[busy,setBusy]=useState(false),[err,setErr]=useState("");
+  const submit=async()=>{setErr("");setBusy(true);
+    try{const {error}=await sb.auth.signInWithPassword({email,password:pw});if(error)throw error;}
+    catch(e){setErr(e.message||"登入失敗");}setBusy(false);};
+  return <div className="min-h-screen grain flex items-center justify-center p-6">
+    <Card className="w-full max-w-sm p-8">
+      <div className="flex items-center gap-3 mb-7">
+        <div className="w-11 h-11 rounded-xl bg-indigo-600 flex items-center justify-center">
+          <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="#fff" strokeWidth="2.2"><path d="M20 7l-8-4-8 4m16 0l-8 4m8-4v10l-8 4m0-10L4 7m8 4v10m0-10L4 7" strokeLinecap="round" strokeLinejoin="round"/></svg></div>
+        <div><div className="font-display font-extrabold text-xl">StockSense</div><div className="text-xs text-slate-400">成衣倉儲管理系統</div></div></div>
+      <label className="block text-sm font-semibold text-slate-600 mb-1.5">電子郵件</label>
+      <input value={email} onChange={e=>setEmail(e.target.value)} onKeyDown={e=>e.key==='Enter'&&submit()} type="email" placeholder="you@factory.com"
+        className="w-full mb-4 bg-white border border-slate-200 rounded-xl px-4 py-2.5 text-sm focus:ring-2 focus:ring-indigo-100 focus:border-indigo-400 outline-none"/>
+      <label className="block text-sm font-semibold text-slate-600 mb-1.5">密碼</label>
+      <input value={pw} onChange={e=>setPw(e.target.value)} onKeyDown={e=>e.key==='Enter'&&submit()} type="password" placeholder="••••••••"
+        className="w-full mb-5 bg-white border border-slate-200 rounded-xl px-4 py-2.5 text-sm focus:ring-2 focus:ring-indigo-100 focus:border-indigo-400 outline-none"/>
+      {err&&<div className="mb-4 text-sm text-rose-600 bg-rose-50 rounded-lg px-3 py-2">{err}</div>}
+      <button onClick={submit} disabled={busy} className="w-full bg-indigo-600 hover:bg-indigo-700 text-white font-semibold py-3 rounded-xl transition-colors disabled:opacity-60 flex items-center justify-center gap-2">{busy&&<Spinner/>}登入</button>
+      <p className="text-xs text-slate-400 text-center mt-4">帳號由管理員建立 · 忘記密碼請洽管理員</p>
+    </Card></div>;
+}
+// ===== 總覽 =====
+function Overview(){
+  const [d,setD]=useState(null),[err,setErr]=useState("");
+  useEffect(()=>{(async()=>{
+    try{
+      const {data:bl,error:e1}=await sb.from('v_stock_by_brand_line').select('*');if(e1)throw e1;
+      const {data:ps,error:e2}=await sb.from('product_sizes').select('total_qty');if(e2)throw e2;
+      const {data:pg,error:e3}=await sb.from('products').select('grade,product_sizes(total_qty)');if(e3)throw e3;
+      const total=(ps||[]).reduce((s,r)=>s+r.total_qty,0);
+      const active=(ps||[]).filter(r=>r.total_qty>0).length;
+      let A=0,B=0;(pg||[]).forEach(p=>{const q=(p.product_sizes||[]).reduce((s,x)=>s+x.total_qty,0);if(p.grade==='A')A+=q;else B+=q;});
+      setD({byLine:(bl||[]).map(r=>({name:r.brand_line,value:r.total_qty})).sort((a,b)=>b.value-a.value),total,active,A,B});
+    }catch(e){setErr(e.message);}
+  })();},[]);
+  if(err)return <ErrBox msg={err}/>;if(!d)return <Loading/>;
+  const max=Math.max(1,...d.byLine.map(x=>x.value));
+  const kpis=[['當前總庫存',fmt(d.total),'PCS','text-indigo-600'],['在庫尺碼數',fmt(d.active),'項','text-sky-600'],['A 品庫存',fmt(d.A),'PCS','text-emerald-600'],['B 品庫存',fmt(d.B),'PCS','text-amber-600']];
+  return <div className="p-4 md:p-8 space-y-4 md:space-y-6">
+    <div className="grid grid-cols-2 lg:grid-cols-4 gap-4 md:gap-6 fade-up">
+      {kpis.map(([l,v,u,c])=><Card key={l} className="p-5 md:p-6"><div className="text-xs font-semibold text-slate-400 uppercase tracking-wide mb-3">{l}</div><div className="flex items-baseline gap-1.5"><span className={`font-mono font-extrabold text-2xl md:text-3xl ${c}`}>{v}</span><span className="text-sm text-slate-400">{u}</span></div></Card>)}
+    </div>
+    <Card className="p-5 md:p-7"><h3 className="font-display font-bold mb-5">各產品線當前庫存</h3>
+      {d.byLine.length?<div className="space-y-2.5">{d.byLine.map((r,i)=><div key={i} className="flex items-center gap-3">
+        <div className="w-20 text-xs font-mono text-slate-500 shrink-0 text-right">{r.name}</div>
+        <div className="flex-1 bg-slate-100 rounded-full h-6 overflow-hidden"><div className="h-full bg-indigo-500 rounded-full flex items-center justify-end pr-2" style={{width:Math.max(6,r.value/max*100)+'%'}}><span className="text-xs font-mono font-semibold text-white">{fmt(r.value)}</span></div></div>
+      </div>)}</div>:<Empty msg="尚無資料,請先由管理員匯入 Excel"/>}</Card>
+  </div>;
+}
+
+// ===== 庫存查詢 =====
+function Inventory(){
+  const [rows,setRows]=useState(null),[err,setErr]=useState(""),[grade,setGrade]=useState(''),[q,setQ]=useState('');
+  useEffect(()=>{const t=setTimeout(async()=>{setRows(null);
+    try{
+      let query=sb.from('product_sizes').select('id,size_label,total_qty,products(style_no,part,color_code,color_desc,grade,brand_lines(canonical,brand))').gt('total_qty',0).order('total_qty',{ascending:false}).limit(500);
+      const {data,error}=await query;if(error)throw error;
+      let list=(data||[]).map(r=>({product_size_id:r.id,size_label:r.size_label,total_qty:r.total_qty,
+        style_no:r.products?.style_no,part:r.products?.part,color_code:r.products?.color_code,color_desc:r.products?.color_desc,grade:r.products?.grade,
+        brand_line:r.products?.brand_lines?.canonical,brand:r.products?.brand_lines?.brand}));
+      if(grade)list=list.filter(r=>r.grade===grade);
+      if(q){const k=q.toLowerCase();list=list.filter(r=>(r.style_no||'').toLowerCase().includes(k)||(r.color_desc||'').toLowerCase().includes(k)||(r.color_code||'').toLowerCase().includes(k));}
+      setRows(list);
+    }catch(e){setErr(e.message);}
+  },300);return()=>clearTimeout(t);},[grade,q]);
+  const sel="bg-white border border-slate-200 text-sm rounded-xl px-4 py-2.5 font-medium focus:ring-2 focus:ring-indigo-100 outline-none";
+  return <div className="p-4 md:p-8"><Card className="overflow-hidden">
+    <div className="p-4 md:p-6 border-b border-slate-100 flex flex-wrap gap-3 items-center">
+      <select className={sel} value={grade} onChange={e=>setGrade(e.target.value)}><option value="">A/B 品</option><option value="A">A 品</option><option value="B">B 品</option></select>
+      <input className={sel+" flex-1 min-w-[160px]"} placeholder="搜尋款號/顏色…" value={q} onChange={e=>setQ(e.target.value)}/>
+      {rows&&<Pill tone="indigo">{fmt(rows.length)} 列</Pill>}
+    </div>
+    {err?<ErrBox msg={err}/>:!rows?<Loading/>:rows.length===0?<Empty msg="無符合資料"/>:
+    <div className="overflow-auto" style={{maxHeight:540}}><table className="w-full">
+      <thead className="bg-slate-50/80 sticky top-0"><tr>{['款號','色號','顏色','產品線','等級','尺碼','件數'].map((h,i)=><th key={h} className={`px-4 py-3 text-xs font-semibold text-slate-400 uppercase ${i===6?'text-right':'text-left'}`}>{h}</th>)}</tr></thead>
+      <tbody className="divide-y divide-slate-50">{rows.map((d,i)=><tr key={i} className="hover:bg-slate-50">
+        <td className="px-4 py-3 font-mono font-semibold text-sm">{d.style_no}{d.part?<span className="text-slate-400">/{d.part}</span>:''}</td>
+        <td className="px-4 py-3 font-mono text-sm text-indigo-600">{d.color_code}</td>
+        <td className="px-4 py-3 text-sm text-slate-500 max-w-[200px] truncate">{d.color_desc}</td>
+        <td className="px-4 py-3 font-mono text-sm text-slate-600">{d.brand_line}</td>
+        <td className="px-4 py-3"><Pill tone={d.grade}>{d.grade} 品</Pill></td>
+        <td className="px-4 py-3 font-mono text-sm">{d.size_label}</td>
+        <td className="px-4 py-3 font-mono font-semibold text-sm text-right">{fmt(d.total_qty)}</td></tr>)}</tbody>
+    </table></div>}
+  </Card></div>;
+}
+
+// ===== Excel 匯入(瀏覽器解析 → rpc_import_records)=====
+function ImportPage(){
+  const [busy,setBusy]=useState(false),[result,setResult]=useState(null),[err,setErr]=useState("");
+  const onFile=async(e)=>{
+    const f=e.target.files[0];if(!f)return;
+    setBusy(true);setErr("");setResult(null);
+    try{
+      const buf=await f.arrayBuffer();
+      const recs=window.parseCartersWorkbook(buf,f.name);
+      if(!recs.length)throw new Error("這個檔案解析不到資料,請確認是 CARTER'S 月度庫存格式");
+      const period=(f.name.match(/(\d{4})-(\d{2})/)||[])[0]||f.name;
+      const {data,error}=await sb.rpc('rpc_import_records',{p_filename:f.name,p_period:period,p_records:recs});
+      if(error)throw error;
+      setResult(data);
+    }catch(ex){setErr(ex.message);}
+    setBusy(false);e.target.value="";
+  };
+  return <div className="p-4 md:p-8"><Card className="p-6 md:p-8 max-w-2xl">
+    <h3 className="font-display font-bold text-lg mb-2">上傳月度庫存 Excel</h3>
+    <p className="text-sm text-slate-500 mb-6">系統在瀏覽器直接解析並更新庫存:已有品項覆蓋為當月盤點值、新品項累計入庫、未列品項保留不動。</p>
+    <label className="block border-2 border-dashed border-slate-200 rounded-2xl p-10 text-center cursor-pointer hover:border-indigo-300 hover:bg-indigo-50/30 transition-colors">
+      <input type="file" accept=".xls,.xlsx" onChange={onFile} className="hidden" disabled={busy}/>
+      {busy?<div className="flex flex-col items-center gap-3 text-indigo-600"><Spinner/><span className="text-sm font-semibold">解析並入庫中…</span></div>:
+      <div className="flex flex-col items-center gap-2 text-slate-500"><svg width="36" height="36" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.6"><path d="M12 16V4m0 0L8 8m4-4l4 4M4 20h16" strokeLinecap="round" strokeLinejoin="round"/></svg><span className="text-sm font-semibold">點擊選擇 .xls / .xlsx 檔案</span></div>}
+    </label>
+    {err&&<div className="mt-5 text-sm text-rose-600 bg-rose-50 rounded-xl px-4 py-3">{err}</div>}
+    {result&&<div className="mt-5 bg-emerald-50 rounded-xl p-5">
+      <div className="font-semibold text-emerald-800 mb-3">✅ 匯入成功 · {result.period}</div>
+      <div className="grid grid-cols-2 gap-3 text-sm">
+        <div><span className="text-slate-500">解析筆數</span><div className="font-mono font-bold">{fmt(result.parsed_rows)}</div></div>
+        <div><span className="text-slate-500">Excel 總量</span><div className="font-mono font-bold">{fmt(result.excel_total)}</div></div>
+        <div><span className="text-slate-500">新增累計</span><div className="font-mono font-bold text-emerald-600">{fmt(result.new_items)}</div></div>
+        <div><span className="text-slate-500">覆蓋更新</span><div className="font-mono font-bold text-indigo-600">{fmt(result.covered)}</div></div>
+        <div className="col-span-2 pt-2 border-t border-emerald-100"><span className="text-slate-500">系統當前總庫存</span><div className="font-mono font-extrabold text-lg">{fmt(result.system_total)}</div></div>
+      </div></div>}
+  </Card></div>;
+}
+
+// ===== 入庫/出庫 =====
+function Move(){
+  const [rows,setRows]=useState(null),[err,setErr]=useState(""),[q,setQ]=useState(''),[n,setN]=useState(1),[msg,setMsg]=useState(null);
+  const load=async()=>{try{
+    let query=sb.from('product_sizes').select('id,size_label,total_qty,products(style_no,part,color_desc,grade)').order('total_qty',{ascending:false}).limit(80);
+    const {data,error}=await query;if(error)throw error;
+    let list=(data||[]).map(r=>({product_size_id:r.id,size_label:r.size_label,total_qty:r.total_qty,style_no:r.products?.style_no,part:r.products?.part,color_desc:r.products?.color_desc,grade:r.products?.grade}));
+    if(q){const k=q.toLowerCase();list=list.filter(r=>(r.style_no||'').toLowerCase().includes(k)||(r.color_desc||'').toLowerCase().includes(k));}
+    setRows(list);
+  }catch(e){setErr(e.message);}};
+  useEffect(()=>{const t=setTimeout(load,300);return()=>clearTimeout(t);},[q]);
+  const showMsg=(m,ok)=>{setMsg({m,ok});setTimeout(()=>setMsg(null),3000);};
+  const doMove=async(row,action)=>{try{
+    if(action==='OUT'){const {data,error}=await sb.rpc('rpc_stock_out',{p_product_size_id:row.product_size_id,p_qty:n});if(error)throw error;showMsg(`出庫成功 · 剩餘 ${data}`,true);}
+    else{const {error}=await sb.from('stock_movements').insert({product_size_id:row.product_size_id,action:'IN',delta_qty:n,note:'手動入庫'});if(error)throw error;showMsg(`入庫成功 · +${n}`,true);}
+    load();
+  }catch(e){showMsg(e.message,false);}};
+  const sel="bg-white border border-slate-200 text-sm rounded-xl px-4 py-2.5 font-medium focus:ring-2 focus:ring-indigo-100 outline-none";
+  return <div className="p-4 md:p-8"><Card className="overflow-hidden">
+    <div className="p-4 md:p-6 border-b border-slate-100 flex flex-wrap gap-3 items-center">
+      <input className={sel+" flex-1 min-w-[200px]"} placeholder="搜尋款號/顏色定位品項…" value={q} onChange={e=>setQ(e.target.value)}/>
+      <div className="flex items-center gap-2"><span className="text-sm text-slate-400">數量</span><input type="number" min="1" value={n} onChange={e=>setN(Math.max(1,+e.target.value||1))} className={sel+" w-24 font-mono"}/></div>
+    </div>
+    {err?<ErrBox msg={err}/>:!rows?<Loading/>:
+    <div className="overflow-auto" style={{maxHeight:520}}><table className="w-full">
+      <thead className="bg-slate-50/80 sticky top-0"><tr>{['款號','顏色','尺碼','等級','現有','操作'].map((h,i)=><th key={h} className={`px-4 py-3 text-xs font-semibold text-slate-400 uppercase ${i>=4?'text-right':'text-left'}`}>{h}</th>)}</tr></thead>
+      <tbody className="divide-y divide-slate-50">{rows.map((d,i)=><tr key={i} className="hover:bg-slate-50">
+        <td className="px-4 py-3 font-mono font-semibold text-sm">{d.style_no}{d.part?'/'+d.part:''}</td>
+        <td className="px-4 py-3 text-sm text-slate-500 max-w-[180px] truncate">{d.color_desc}</td>
+        <td className="px-4 py-3 font-mono text-sm">{d.size_label}</td>
+        <td className="px-4 py-3"><Pill tone={d.grade}>{d.grade}</Pill></td>
+        <td className={`px-4 py-3 font-mono font-semibold text-sm text-right ${d.total_qty<=5?'text-rose-500':''}`}>{fmt(d.total_qty)}</td>
+        <td className="px-4 py-3 text-right whitespace-nowrap">
+          <button onClick={()=>doMove(d,'IN')} className="px-3 py-1.5 rounded-lg bg-emerald-50 text-emerald-700 hover:bg-emerald-100 text-sm font-semibold mr-2">＋入庫</button>
+          <button onClick={()=>doMove(d,'OUT')} className="px-3 py-1.5 rounded-lg bg-rose-50 text-rose-600 hover:bg-rose-100 text-sm font-semibold">－出庫</button>
+        </td></tr>)}</tbody>
+    </table></div>}
+  </Card>
+  {msg&&<div className={`fixed bottom-20 md:bottom-8 left-1/2 -translate-x-1/2 z-50 px-6 py-3.5 rounded-2xl text-sm font-semibold shadow-lg ${msg.ok?'bg-slate-900 text-white':'bg-rose-600 text-white'}`}>{msg.m}</div>}
+  </div>;
+}
+
+// ===== 主應用 =====
+function App(){
+  const [session,setSession]=useState(undefined),[profile,setProfile]=useState(null),[tab,setTab]=useState('overview');
+  useEffect(()=>{sb.auth.getSession().then(({data})=>setSession(data.session));
+    const {data:sub}=sb.auth.onAuthStateChange((_e,s)=>setSession(s));return()=>sub.subscription.unsubscribe();},[]);
+  useEffect(()=>{if(session){sb.from('profiles').select('email,role').eq('id',session.user.id).single().then(({data})=>setProfile(data||{email:session.user.email,role:'picker'}));}else setProfile(null);},[session]);
+  const logout=async()=>{await sb.auth.signOut();setTab('overview');};
+  if(session===undefined)return <div className="min-h-screen flex items-center justify-center"><Spinner/></div>;
+  if(!session)return <Login/>;
+  if(!profile)return <div className="min-h-screen flex items-center justify-center"><Spinner/></div>;
+  const role=profile.role;
+  const nav=[['overview','總覽','all'],['inventory','查詢','all'],['import','匯入','admin'],['move','入出庫','all']].filter(i=>i[2]==='all'||i[2]===role);
+  const safeTab=(tab==='import'&&role!=='admin')?'overview':tab;
+  const titles={overview:['總覽儀表板','即時掌握各品牌庫存'],inventory:['庫存查詢','多維度交叉篩選'],import:['Excel 匯入','上傳月度盤點自動更新庫存'],move:['入庫 / 出庫','FIFO 與庫存不足防呆']};
+  return <div className="min-h-screen grain">
+    <aside className="hidden md:flex fixed left-0 top-0 h-full w-64 bg-white border-r border-slate-100 flex-col z-20">
+      <div className="px-6 py-7 flex items-center gap-3"><div className="w-10 h-10 rounded-xl bg-indigo-600 flex items-center justify-center"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="#fff" strokeWidth="2.2"><path d="M20 7l-8-4-8 4m16 0l-8 4m8-4v10l-8 4m0-10L4 7m8 4v10m0-10L4 7" strokeLinecap="round" strokeLinejoin="round"/></svg></div><div><div className="font-display font-extrabold text-lg leading-none">StockSense</div><div className="text-xs text-slate-400 mt-1">成衣倉儲管理</div></div></div>
+      <nav className="flex-1 px-3 space-y-1 mt-2">{nav.map(([k])=><button key={k} onClick={()=>setTab(k)} className={`w-full text-left px-4 py-3 rounded-xl text-sm font-semibold transition-all ${safeTab===k?'bg-indigo-50 text-indigo-700':'text-slate-500 hover:bg-slate-50'}`}>{titles[k][0]}</button>)}</nav>
+      <div className="p-4 m-3 rounded-xl bg-slate-50 border border-slate-100"><Pill tone={role==='admin'?'indigo':'slate'}>{role==='admin'?'管理員':'理貨員'}</Pill><div className="text-xs text-slate-500 truncate mt-2">{profile.email}</div><button onClick={logout} className="mt-3 text-xs font-semibold text-rose-500">登出</button></div>
+    </aside>
+    <nav className="md:hidden fixed bottom-0 left-0 right-0 z-30 bg-white/90 backdrop-blur-md border-t border-slate-200 flex justify-around px-1 py-2">{nav.map(([k,l])=><button key={k} onClick={()=>setTab(k)} className={`flex flex-col items-center px-3 py-1 rounded-xl text-xs font-semibold ${safeTab===k?'text-indigo-600':'text-slate-400'}`}>{l}</button>)}</nav>
+    <div className="md:ml-64 pb-20 md:pb-0">
+      <header className="sticky top-0 z-10 backdrop-blur-md bg-white/80 border-b border-slate-100 px-4 md:px-8 py-4 md:py-5 flex items-center justify-between"><div><h1 className="font-display font-bold text-lg md:text-xl">{titles[safeTab][0]}</h1><p className="text-xs md:text-sm text-slate-500 mt-0.5">{titles[safeTab][1]}</p></div><button onClick={logout} className="md:hidden text-xs font-semibold text-rose-500">登出</button></header>
+      <main className="fade-up" key={safeTab}>
+        {safeTab==='overview'&&<Overview/>}{safeTab==='inventory'&&<Inventory/>}{safeTab==='import'&&<ImportPage/>}{safeTab==='move'&&<Move/>}
+      </main>
+    </div>
+  </div>;
+}
+ReactDOM.createRoot(document.getElementById('root')).render(<App/>);
+</script>
+<!-- 主應用結束 -->
+</body>
+</html>
