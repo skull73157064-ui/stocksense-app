@@ -637,14 +637,57 @@ function Photos(){
     }catch(e){showMsg("上傳失敗:"+e.message,false);}
     setUpId(null);
   };
+  const [batchBusy,setBatchBusy]=useState(false),[batchLog,setBatchLog]=useState(null);
+  const onBatchUpload=async(files)=>{
+    if(!files||!files.length)return;
+    setBatchBusy(true);setBatchLog(null);
+    // 取得所有款式(用款號比對)
+    let prods=[];
+    try{
+      const {data}=await sb.from('products').select('id,style_no,color_code,grade,image_url').limit(2000);
+      prods=data||[];
+    }catch(e){showMsg("讀取款式失敗:"+e.message,false);setBatchBusy(false);return;}
+    let ok=0,skip=0,fail=0;const fails=[];
+    for(const file of files){
+      // 從檔名抓款號(開頭的字母數字,到第一個 _ 或 . 或空格)
+      const base=file.name.replace(/\.(png|jpg|jpeg|webp|gif)$/i,'');
+      const m=base.match(/^([A-Za-z]{2,4}\d{3,})/);
+      const styleKey=m?m[1].toUpperCase():base.toUpperCase();
+      // 找符合款號的款式(可能多筆同款不同色,全配同圖)
+      const targets=prods.filter(p=>(p.style_no||'').toUpperCase()===styleKey);
+      if(!targets.length){skip++;fails.push(file.name+"(找不到款號)");continue;}
+      try{
+        const ext=(file.name.split('.').pop()||'png').toLowerCase();
+        const path=`${styleKey}_${Date.now()}_${Math.random().toString(36).slice(2,6)}.${ext}`.replace(/[^0-9A-Za-z._-]/g,'_');
+        const {error:upErr}=await sb.storage.from('product-images').upload(path,file,{upsert:true});
+        if(upErr)throw upErr;
+        const url=sb.storage.from('product-images').getPublicUrl(path).data.publicUrl;
+        for(const t of targets){
+          await sb.from('products').update({image_url:url}).eq('id',t.id);
+        }
+        ok++;
+      }catch(e){fail++;fails.push(file.name+"("+e.message+")");}
+    }
+    setBatchLog({ok,skip,fail,fails:fails.slice(0,10)});
+    setBatchBusy(false);load();
+  };
   const sel="bg-white border border-slate-200 text-sm rounded-xl px-4 py-2.5 font-medium focus:ring-2 focus:ring-indigo-100 outline-none";
   return <div className="p-4 md:p-8"><Card className="overflow-hidden">
     <div className="p-4 md:p-6 border-b border-slate-100 flex flex-wrap gap-3 items-center">
       <select className={sel} value={brand} onChange={e=>setBrand(e.target.value)}><option value="">全部品牌</option>{brands.map(b=><option key={b} value={b}>{b}</option>)}</select>
       <input className={sel+" flex-1 min-w-[160px]"} placeholder="搜尋款號/顏色…" value={q} onChange={e=>setQ(e.target.value)}/>
       <label className="flex items-center gap-2 text-sm text-slate-600 cursor-pointer"><input type="checkbox" checked={onlyNo} onChange={e=>setOnlyNo(e.target.checked)}/>只看缺照片</label>
+      <label className={`px-4 py-2.5 rounded-xl text-sm font-semibold cursor-pointer ${batchBusy?'bg-slate-100 text-slate-400':'bg-indigo-600 text-white hover:bg-indigo-700'}`}>
+        {batchBusy?'批次上傳中…':'📦 批次配對上傳'}
+        <input type="file" accept="image/*" multiple className="hidden" disabled={batchBusy} onChange={e=>onBatchUpload(Array.from(e.target.files))}/>
+      </label>
       {rows&&<Pill tone="indigo">{fmt(rows.length)} 款</Pill>}
     </div>
+    <div className="px-4 md:px-6 py-2 bg-indigo-50 text-xs text-indigo-700 border-b border-indigo-100">💡 批次配對上傳:一次選多張圖,系統依「檔名開頭的款號」自動配對(例如 KDC240018.png 會自動配到 KDC240018 這款)。Claude 幫你從 Excel 抽好的圖,檔名就是款號,直接整批選起來即可。</div>
+    {batchLog&&<div className="px-4 md:px-6 py-3 bg-emerald-50 border-b border-emerald-100 text-sm">
+      <span className="font-semibold text-emerald-800">批次完成:</span> 成功 {batchLog.ok} · 找不到款號略過 {batchLog.skip} · 失敗 {batchLog.fail}
+      {batchLog.fails.length>0&&<div className="mt-1 text-xs text-slate-500">未配對:{batchLog.fails.join("、")}</div>}
+    </div>}
     {err?<ErrBox msg={err}/>:!rows?<Loading/>:rows.length===0?<Empty msg="無款式"/>:
     <div className="p-4 md:p-6 grid grid-cols-2 md:grid-cols-4 lg:grid-cols-5 gap-4" style={{maxHeight:560,overflow:'auto'}}>
       {rows.map(d=><div key={d.id} className="border border-slate-100 rounded-xl overflow-hidden">
