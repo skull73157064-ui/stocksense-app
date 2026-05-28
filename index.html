@@ -20,6 +20,8 @@
   .spin{animation:spin 1s linear infinite}@keyframes spin{to{transform:rotate(360deg)}}
   .font-display{font-family:'Sora',sans-serif}.font-mono{font-family:'JetBrains Mono',monospace}
 </style>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
 </head>
 <body class="text-slate-900 antialiased">
 <div id="root"></div>
@@ -86,7 +88,13 @@
     return [null,{}];
   }
   function isASheet(name){return (name.includes("A品")||name.includes("A 品"))&&!name.includes("B品")&&!name.includes("B-品");}
-  function isBSheet(name){const n=name.trim();return n==="B品"||n==="B-品"||n.startsWith("B品")||n.startsWith("B-品");}
+  // B品頁籤:只要名稱裡含有「B品」兩字就算(包含GACB品、KAC-B品、B品、B-品等)
+  function isBSheet(name){return /B[\s-]*品/.test(name);}
+  // 判斷B品頁籤用的是「新格式」(跟A品欄位一樣,按尺碼展開)還是「舊格式」(只有總量一欄)
+  function isBSheetNewFormat(rows){
+    const [hdrRow,sizemap]=findSizeHeader(rows);
+    return hdrRow!==null&&Object.keys(sizemap).length>2; // 有多個尺碼欄=新格式
+  }
   function lineCode(sheetName){
     const n=clean(sheetName);const m=n.match(/^([A-Z]{2,4})/);let base=m?m[1]:n;let sub="";
     if(n.includes("上衣"))sub="上衣";else if(n.includes("裤子")||n.includes("褲子"))sub="裤子";
@@ -156,7 +164,17 @@
     for(const name of wb.SheetNames){
       const ws=wb.Sheets[name];
       const rows=XLSX.utils.sheet_to_json(ws,{header:1,raw:true,defval:""});
-      if(isBSheet(name))recs=recs.concat(parseBSheet(rows,period));
+      if(isBSheet(name)){
+        // 自動判斷新格式(欄位跟A品一樣)或舊格式
+        if(isBSheetNewFormat(rows)){
+          // 新格式:用A品解析器,但強制grade=B
+          const aRecs=parseASheet(rows,name,period);
+          aRecs.forEach(r=>r.grade="B");
+          recs=recs.concat(aRecs);
+        }else{
+          recs=recs.concat(parseBSheet(rows,period));
+        }
+      }
       else if(isASheet(name))recs=recs.concat(parseASheet(rows,name,period));
     }
     return recs;
@@ -221,7 +239,7 @@ function Overview(){
   const allBrands=[...new Set(d.batches.map(b=>b.brand).filter(Boolean))].sort();
   const allPeriods=[...new Set(d.batches.map(b=>b.period).filter(Boolean))].sort().reverse();
   // 套用篩選到批次
-  let fb=d.batches;
+  let fb=d.batches.filter(b=>(b.total_qty||0)>0); // 只顯示還有庫存的批次
   if(fBrand)fb=fb.filter(b=>b.brand===fBrand);
   if(fPeriod)fb=fb.filter(b=>b.period===fPeriod);
   const filtered=fBrand||fPeriod;
@@ -229,8 +247,8 @@ function Overview(){
   const fTotal=fb.reduce((s,b)=>s+(b.total_qty||0),0);
   // 各品牌(若有篩品牌就只顯示該品牌的批次彙總,否則用全品牌彙總)
   const byBrandShow = filtered
-    ? Object.entries(fb.reduce((m,b)=>{m[b.brand]=(m[b.brand]||0)+(b.total_qty||0);return m;},{})).map(([name,value])=>({name,value})).sort((a,b)=>b.value-a.value)
-    : d.byBrand;
+    ? Object.entries(fb.reduce((m,b)=>{m[b.brand]=(m[b.brand]||0)+(b.total_qty||0);return m;},{})).map(([name,value])=>({name,value})).filter(r=>r.value>0).sort((a,b)=>b.value-a.value)
+    : d.byBrand.filter(r=>r.value>0);
   const max=Math.max(1,...byBrandShow.map(x=>x.value));
   const kpis=filtered
     ? [['篩選後庫存',fmt(fTotal),'PCS','text-indigo-600'],['批次數',fmt(fb.length),'批','text-sky-600'],['品牌數',fmt(new Set(fb.map(b=>b.brand)).size),'個','text-emerald-600']]
@@ -248,7 +266,7 @@ function Overview(){
     </div>
     <Card className="p-5 md:p-7"><h3 className="font-display font-bold mb-5">各品牌庫存{filtered?'(篩選後)':''}</h3>
       {byBrandShow.length?<div className="space-y-2.5">{byBrandShow.map((r,i)=><div key={i} className="flex items-center gap-3">
-        <div className="w-24 text-xs font-semibold text-slate-600 shrink-0 text-right truncate">{r.name||'(未分品牌)'}</div>
+        <div className="w-24 text-xs font-semibold text-slate-600 shrink-0 text-right truncate" title={r.name||'(未分品牌)'}>{r.name||'(未分品牌)'}</div>
         <div className="flex-1 bg-slate-100 rounded-full h-6 overflow-hidden"><div className="h-full bg-indigo-500 rounded-full flex items-center justify-end pr-2" style={{width:Math.max(6,r.value/max*100)+'%'}}><span className="text-xs font-mono font-semibold text-white">{fmt(r.value)}</span></div></div>
         {r.styles!=null&&<div className="w-16 text-xs text-slate-400 shrink-0">{fmt(r.styles)}款</div>}
       </div>)}</div>:<Empty msg="尚無資料,請先匯入 Excel"/>}</Card>
@@ -258,7 +276,7 @@ function Overview(){
         <tbody className="divide-y divide-slate-50">{fb.map((b,i)=><tr key={i} className="hover:bg-slate-50">
           <td className="px-3 py-2 font-semibold text-slate-700">{b.brand}</td>
           <td className="px-3 py-2 font-mono text-slate-600">{b.period}</td>
-          <td className="px-3 py-2 text-xs text-slate-400 max-w-[200px] truncate" title={b.filename}>{b.filename}</td>
+          <td className="px-3 py-2 text-xs text-slate-400 max-w-[180px] truncate" title={b.filename||'—'}><span className="block truncate">{b.filename||'—'}</span></td>
           <td className="px-3 py-2 text-xs">{b.release_date?<span className={b.release_date>today?'text-rose-500':'text-slate-500'}>{b.release_date}</span>:<span className="text-slate-300">—</span>}</td>
           <td className="px-3 py-2 font-mono font-semibold text-right">{fmt(b.total_qty)}</td>
         </tr>)}</tbody></table></div>:<Empty msg="無符合批次"/>}</Card>
@@ -269,7 +287,7 @@ function Overview(){
 // ===== 庫存查詢(品牌/等級/檔名篩選 + 解禁顏色)=====
 function Inventory(){
   const [rows,setRows]=useState(null),[err,setErr]=useState(""),[grade,setGrade]=useState(''),[brand,setBrand]=useState(''),[print,setPrint]=useState(''),[q,setQ]=useState(''),[fileq,setFileq]=useState('');
-  const [brands,setBrands]=useState([]),[zoom,setZoom]=useState(null);
+  const [brands,setBrands]=useState([]),[zoom,setZoom]=useState(null),[exporting,setExporting]=useState(false);
   useEffect(()=>{sb.from('v_stock_by_brand').select('brand').then(({data})=>setBrands((data||[]).map(b=>b.brand).filter(Boolean)));},[]);
   useEffect(()=>{const t=setTimeout(async()=>{setRows(null);
     try{
@@ -289,6 +307,59 @@ function Inventory(){
   const today=new Date().toISOString().slice(0,10);
   const relTag=(d)=>{if(!d)return <span className="text-slate-300">—</span>;return <span className={`px-2 py-0.5 rounded text-xs font-semibold ${d<=today?'bg-slate-100 text-slate-500':'bg-rose-100 text-rose-600'}`}>{d}</span>;};
   const printTag=(p)=>{if(!p)return <span className="text-slate-300 text-xs">—</span>;const has=/有/.test(p);return <span className={`px-2 py-0.5 rounded text-xs font-semibold ${has?'bg-violet-100 text-violet-700':'bg-slate-100 text-slate-500'}`}>{has?'有印花':'無印花'}</span>;};
+  const exportExcel=async(data)=>{
+    setExporting(true);
+    try{
+      const wb=window.XLSX.utils.book_new();
+      const wsData=[['品牌','款號','色號','顏色','產品線','等級','印花','尺碼','解禁日','來源檔','件數','圖片URL']];
+      data.forEach(d=>wsData.push([d.brand||'',d.style_no+(d.part?'/'+d.part:''),d.color_code||'',d.color_desc||'',d.brand_line||'',d.grade||'',d.print_mark||'',d.size_label||'',d.release_date||'',d.last_filename||'',d.total_qty,d.image_url||'']));
+      const ws=window.XLSX.utils.aoa_to_sheet(wsData);
+      ws['!cols']=[{wch:12},{wch:14},{wch:8},{wch:20},{wch:10},{wch:6},{wch:12},{wch:8},{wch:12},{wch:30},{wch:8},{wch:60}];
+      window.XLSX.utils.book_append_sheet(wb,ws,'庫存查詢');
+      window.XLSX.writeFile(wb,'StockSense_庫存_'+new Date().toISOString().slice(0,10)+'.xlsx');
+    }catch(e){alert('導出失敗:'+e.message);}
+    setExporting(false);
+  };
+  const exportPDF=async(data)=>{
+    if(!data||!data.length){alert('沒有資料可導出');return;}
+    setExporting(true);
+    try{
+      const {jsPDF}=window.jspdf;
+      const doc=new jsPDF({orientation:'landscape',unit:'mm',format:'a4'});
+      const pageW=297,pageH=210,margin=10,rowH=22,headerH=9;
+      const cols=[{h:'圖片',w:22},{h:'品牌',w:22},{h:'款號',w:28},{h:'色號',w:16},{h:'顏色',w:30},{h:'等級',w:12},{h:'印花',w:22},{h:'尺碼',w:14},{h:'來源檔',w:35},{h:'件數',w:16}];
+      let y=margin;
+      doc.setFontSize(13);doc.text('StockSense 庫存報表',margin,y);y+=7;
+      doc.setFontSize(8);doc.text('導出:'+new Date().toLocaleString('zh-TW')+' / 共'+data.length+'筆',margin,y);y+=6;
+      const drawHeader=()=>{
+        doc.setFillColor(235,235,250);doc.rect(margin,y,pageW-2*margin,headerH,'F');
+        doc.setFontSize(7);doc.setTextColor(60,60,120);
+        let x=margin;cols.forEach(c=>{doc.text(c.h,x+1,y+6);x+=c.w;});
+        doc.setTextColor(40,40,40);y+=headerH;
+      };
+      drawHeader();
+      for(const d of data){
+        if(y+rowH>pageH-margin){doc.addPage();y=margin;drawHeader();}
+        const ry=y;
+        if(d.image_url){try{
+          const rsp=await fetch(d.image_url);const bl=await rsp.blob();
+          await new Promise(res=>{const fr=new FileReader();fr.onload=ev=>{try{doc.addImage(ev.target.result,'PNG',margin+0.5,ry+0.5,19,19);}catch(e){}res();};fr.onerror=res;fr.readAsDataURL(bl);});
+        }catch(e){}}
+        doc.setFontSize(6.5);
+        const vals=['',d.brand||'',d.style_no+(d.part?'/'+d.part:''),d.color_code||'',d.color_desc||'',d.grade||'',d.print_mark||'',d.size_label||'',d.last_filename||'',(d.total_qty||0).toString()];
+        let x=margin;
+        vals.forEach((v,i)=>{
+          if(i>0){const t=v.length>13?v.slice(0,12)+'…':v;doc.text(t,x+1,ry+12);}
+          x+=cols[i].w;
+        });
+        doc.setDrawColor(210,210,225);doc.line(margin,ry+rowH,pageW-margin,ry+rowH);
+        y+=rowH;
+      }
+      doc.save('StockSense_庫存_'+new Date().toISOString().slice(0,10)+'.pdf');
+    }catch(e){alert('PDF導出失敗:'+e.message);}
+    setExporting(false);
+  };
+
   return <div className="p-4 md:p-8"><Card className="overflow-hidden">
     <div className="p-4 md:p-6 border-b border-slate-100 flex flex-wrap gap-3 items-center">
       <select className={sel} value={brand} onChange={e=>setBrand(e.target.value)}><option value="">全部品牌</option>{brands.map(b=><option key={b} value={b}>{b}</option>)}</select>
@@ -296,7 +367,9 @@ function Inventory(){
       <select className={sel} value={print} onChange={e=>setPrint(e.target.value)}><option value="">印花不限</option><option value="Y">有印花</option><option value="N">無印花</option></select>
       <input className={sel+" flex-1 min-w-[130px]"} placeholder="搜尋款號/顏色…" value={q} onChange={e=>setQ(e.target.value)}/>
       <input className={sel+" flex-1 min-w-[130px]"} placeholder="依檔名篩選…" value={fileq} onChange={e=>setFileq(e.target.value)}/>
-      {rows&&<Pill tone="indigo">{fmt(rows.length)} 列</Pill>}
+      {rows&&<><Pill tone="indigo">{fmt(rows.length)} 列</Pill><Pill tone="slate">{fmt(rows.reduce((s,r)=>s+(r.total_qty||0),0))} 件</Pill></>}
+      <button onClick={()=>exportExcel(rows)} disabled={exporting||!rows||!rows.length} className="px-3 py-2 rounded-xl bg-emerald-600 text-white text-sm font-semibold disabled:opacity-40">⬇ Excel</button>
+      <button onClick={()=>exportPDF(rows)} disabled={exporting||!rows||!rows.length} className="px-3 py-2 rounded-xl bg-rose-600 text-white text-sm font-semibold disabled:opacity-40">⬇ PDF</button>
     </div>
     {err?<ErrBox msg={err}/>:!rows?<Loading/>:rows.length===0?<Empty msg="無符合資料"/>:
     <div className="overflow-auto" style={{maxHeight:540}}><table className="w-full">
@@ -323,32 +396,42 @@ function Inventory(){
 
 // ===== Excel 匯入(瀏覽器解析 → rpc_import_records)=====
 function ImportPage(){
-  const [stage,setStage]=useState('idle'); // idle|edit|done
+  // 支援批量上傳:queue 是待處理的檔案清單
+  const [queue,setQueue]=useState([]); // [{file,status,result,error}]
+  const [current,setCurrent]=useState(null); // 正在處理的那個
+  const [stage,setStage]=useState('idle'); // idle|edit|done|batch_done
   const [busy,setBusy]=useState(false),[err,setErr]=useState("");
   const [file,setFile]=useState(null),[rows,setRows]=useState([]);
   const [brand,setBrand]=useState(""),[period,setPeriod]=useState(""),[release,setRelease]=useState("");
   const [result,setResult]=useState(null);
-  const [imgMap,setImgMap]=useState({}); // style_no -> image_url (從後端抽圖)
+  const [imgMap,setImgMap]=useState({});
   const [extracting,setExtracting]=useState(false),[extractMsg,setExtractMsg]=useState("");
   const PRINT_OPTS=["","有印花繡花","無印花繡花"];
 
-  const onFile=async(e)=>{
-    const f=e.target.files[0];if(!f)return;
+  const processFile=async(f)=>{
     setBusy(true);setErr("");setResult(null);setImgMap({});setExtractMsg("");
     try{
-      // 1. 解析 Excel 資料(前端)
       const buf=await f.arrayBuffer();
       const r=window.parseCartersWorkbook(buf,f.name);
-      if(!r.length)throw new Error("這個檔案解析不到資料,請確認格式");
+      if(!r.length)throw new Error("這個檔案解析不到資料");
       r.forEach(x=>{const p=x.print_mark||"";x.print_mark=/有|印|绣|繡|花/.test(p)&&!/無|无/.test(p)?"有印花繡花":(/無|无/.test(p)?"無印花繡花":"");});
       setFile(f);setRows(r);
       setBrand(window.brandFromFilename(f.name));
       setPeriod(window.periodFromFilename(f.name));setRelease("");
       setStage('edit');
-      // 2. 同時送到後端抽圖(非同步,不阻擋核對)
       extractImages(f);
     }catch(ex){setErr(ex.message);}
-    setBusy(false);e.target.value="";
+    setBusy(false);
+  };
+
+  const onFiles=async(e)=>{
+    const files=Array.from(e.target.files);
+    e.target.value="";
+    if(!files.length)return;
+    if(files.length===1){processFile(files[0]);return;}
+    // 批量模式
+    const q=files.map(f=>({file:f,status:'pending',result:null,error:null}));
+    setQueue(q);setStage('batch_queue');
   };
 
   const extractImages=async(f)=>{
@@ -357,28 +440,57 @@ function ImportPage(){
     try{
       const session=await sb.auth.getSession();
       const token=session?.data?.session?.access_token;
-      if(!token){setExtractMsg("⚠ 無法取得登入 token,跳過自動抽圖");setExtracting(false);return;}
+      if(!token){setExtractMsg("⚠ 無法取得登入 token");setExtracting(false);return;}
       const fd=new FormData();fd.append('file',f);
-      const res=await fetch(`${window.CONFIG.BACKEND_URL}/extract`,{
-        method:'POST',headers:{Authorization:`Bearer ${token}`},body:fd});
+      const res=await fetch(`${window.CONFIG.BACKEND_URL}/extract`,{method:'POST',headers:{Authorization:`Bearer ${token}`},body:fd});
       if(!res.ok){const t=await res.text();throw new Error(`後端回應${res.status}: ${t.slice(0,100)}`);}
       const data=await res.json();
       if(data.ok&&data.results){
-        const m={};
-        const errs=[];
-        data.results.forEach(r=>{
-          if(r.image_url)m[r.style_no]=r.image_url;
-          else if(r.error)errs.push(`${r.style_no}:${r.error.slice(0,60)}`);
-        });
+        const m={};const errs=[];
+        data.results.forEach(r=>{if(r.image_url)m[r.style_no]=r.image_url;else if(r.error)errs.push(`${r.style_no}:${r.error.slice(0,60)}`);});
         setImgMap(m);
-        const errTxt=errs.length?` (失敗:${errs.slice(0,2).join(' | ')})`:''
+        const errTxt=errs.length?` (失敗:${errs.slice(0,2).join(' | ')})`:'';
         setExtractMsg(`✅ 自動抽圖完成:${data.uploaded}/${data.extracted} 張已上傳${errTxt}`);
       }
     }catch(ex){setExtractMsg(`⚠ 自動抽圖失敗(可手動補):${ex.message.slice(0,80)}`);}
     setExtracting(false);
   };
 
+  // 批量處理:逐一自動匯入不需核對
+  const runBatch=async()=>{
+    setBusy(true);
+    const updated=[...queue];
+    for(let i=0;i<updated.length;i++){
+      if(updated[i].status!=='pending')continue;
+      updated[i].status='processing';setQueue([...updated]);
+      try{
+        const f=updated[i].file;
+        const buf=await f.arrayBuffer();
+        const r=window.parseCartersWorkbook(buf,f.name);
+        if(!r.length)throw new Error("解析不到資料");
+        r.forEach(x=>{const p=x.print_mark||"";x.print_mark=/有|印|绣|繡|花/.test(p)&&!/無|无/.test(p)?"有印花繡花":(/無|无/.test(p)?"無印花繡花":"");});
+        const b=window.brandFromFilename(f.name);
+        const p=window.periodFromFilename(f.name);
+        const clean=r.filter(x=>x.style_no&&parseInt(x.qty)>0).map(x=>({...x,qty:parseInt(x.qty),brand:b}));
+        const {data,error}=await sb.rpc('rpc_import_commit',{p_filename:f.name,p_brand:b,p_period:p,p_release_date:null,p_records:clean,p_expected_total:clean.reduce((s,x)=>s+x.qty,0)});
+        if(error)throw error;
+        // 背景抽圖
+        (async()=>{try{
+          const session=await sb.auth.getSession();const token=session?.data?.session?.access_token;
+          if(!token)return;const fd=new FormData();fd.append('file',f);
+          const res=await fetch(`${window.CONFIG.BACKEND_URL}/extract`,{method:'POST',headers:{Authorization:`Bearer ${token}`},body:fd});
+          if(res.ok){const d=await res.json();if(d.ok&&d.results){for(const rx of d.results){if(rx.image_url)await sb.from('products').update({image_url:rx.image_url}).eq('style_no',rx.style_no).is('image_url',null);}}}
+        }catch(e){}})();
+        updated[i]={...updated[i],status:'done',result:data};
+      }catch(ex){updated[i]={...updated[i],status:'error',error:ex.message};}
+      setQueue([...updated]);
+    }
+    setBusy(false);setStage('batch_done');
+  };
+
   const total=rows.reduce((s,r)=>s+(parseInt(r.qty)||0),0);
+  const totalA=rows.filter(r=>r.grade==='A').reduce((s,r)=>s+(parseInt(r.qty)||0),0);
+  const totalB=rows.filter(r=>r.grade==='B').reduce((s,r)=>s+(parseInt(r.qty)||0),0);
   const setCell=(i,k,v)=>{const n=[...rows];n[i]={...n[i],[k]:v};setRows(n);};
   const delRow=(i)=>setRows(rows.filter((_,j)=>j!==i));
   const addRow=()=>setRows([...rows,{brand,period,line:"",grade:"A",style_no:"",part:"",color_code:"",color_desc:"",size:"",qty:0,print_mark:""}]);
@@ -386,61 +498,80 @@ function ImportPage(){
   const commit=async()=>{
     setBusy(true);setErr("");
     try{
-      const clean=rows.filter(r=>r.style_no&&parseInt(r.qty)>0).map(r=>{
-        const img=imgMap[r.style_no];
-        return {...r,qty:parseInt(r.qty),brand,image_url:img||null};
-      });
-      if(!clean.length)throw new Error("沒有有效資料列(需有款號且數量>0)");
-      const {data,error}=await sb.rpc('rpc_import_commit',{
-        p_filename:file.name,p_brand:brand,p_period:period,
-        p_release_date:release||null,p_records:clean,
-        p_expected_total:clean.reduce((s,r)=>s+r.qty,0)});
+      const clean=rows.filter(r=>r.style_no&&parseInt(r.qty)>0).map(r=>({...r,qty:parseInt(r.qty),brand,image_url:imgMap[r.style_no]||null}));
+      if(!clean.length)throw new Error("沒有有效資料列");
+      const {data,error}=await sb.rpc('rpc_import_commit',{p_filename:file.name,p_brand:brand,p_period:period,p_release_date:release||null,p_records:clean,p_expected_total:clean.reduce((s,r)=>s+r.qty,0)});
       if(error)throw error;
-      // 把抽到的圖片 URL 寫進 products
-      if(Object.keys(imgMap).length>0){
-        for(const [sno,url] of Object.entries(imgMap)){
-          await sb.from('products').update({image_url:url}).eq('style_no',sno).is('image_url',null);
-        }
-      }
+      if(Object.keys(imgMap).length>0){for(const[sno,url]of Object.entries(imgMap)){await sb.from('products').update({image_url:url}).eq('style_no',sno).is('image_url',null);}}
       setResult(data);setStage('done');
     }catch(ex){setErr(ex.message);}
     setBusy(false);
   };
 
-  const reset=()=>{setStage('idle');setFile(null);setRows([]);setResult(null);setErr("");setImgMap({});setExtractMsg("");};
+  const reset=()=>{setStage('idle');setFile(null);setRows([]);setResult(null);setErr("");setImgMap({});setExtractMsg("");setQueue([]);};
   const inp="bg-white border border-slate-200 text-sm rounded-lg px-2 py-1.5 focus:ring-2 focus:ring-indigo-100 outline-none w-full";
   const inpL="bg-white border border-slate-200 text-sm rounded-xl px-4 py-2.5 font-medium focus:ring-2 focus:ring-indigo-100 outline-none w-full";
 
   return <div className="p-4 md:p-8"><Card className="p-5 md:p-7 max-w-6xl">
     <h3 className="font-display font-bold text-lg mb-2">上傳月度庫存 Excel</h3>
-    <p className="text-sm text-slate-500 mb-5">上傳後系統自動解析資料並抽取 Excel 內嵌圖片,在核對畫面確認無誤後入庫。</p>
+    <p className="text-sm text-slate-500 mb-5">可一次選多個檔案批量匯入。單個檔案可在核對畫面修正後入庫。</p>
 
     {stage==='idle'&&<label className="block border-2 border-dashed border-slate-200 rounded-2xl p-10 text-center cursor-pointer hover:border-indigo-300 hover:bg-indigo-50/30 transition-colors">
-      <input type="file" accept=".xls,.xlsx" onChange={onFile} className="hidden" disabled={busy}/>
+      <input type="file" accept=".xls,.xlsx" multiple onChange={onFiles} className="hidden" disabled={busy}/>
       {busy?<div className="flex flex-col items-center gap-3 text-indigo-600"><Spinner/><span className="text-sm font-semibold">解析中…</span></div>:
       <div className="flex flex-col items-center gap-2 text-slate-500">
         <svg width="36" height="36" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.6"><path d="M12 16V4m0 0L8 8m4-4l4 4M4 20h16" strokeLinecap="round" strokeLinejoin="round"/></svg>
-        <span className="text-sm font-semibold">點擊選擇 .xls / .xlsx 檔案</span>
-        <span className="text-xs text-slate-400">系統會自動抽取 Excel 內的款式圖片並對應款號</span>
+        <span className="text-sm font-semibold">點擊選擇 .xls / .xlsx 檔案（可多選）</span>
+        <span className="text-xs text-slate-400">選多個檔案會批量自動匯入，單個檔案可手動核對</span>
       </div>}
     </label>}
+
+    {stage==='batch_queue'&&<div>
+      <div className="bg-indigo-50 border border-indigo-200 rounded-xl p-4 mb-4">
+        <div className="font-semibold text-indigo-800 mb-1">📦 批量匯入 {queue.length} 個檔案</div>
+        <div className="text-sm text-indigo-700">系統將依序自動解析並入庫，解禁日請事後在總覽中補填。</div>
+      </div>
+      <div className="space-y-2 mb-4 max-h-64 overflow-auto">
+        {queue.map((q,i)=><div key={i} className="flex items-center gap-3 text-sm px-3 py-2 bg-slate-50 rounded-lg">
+          <span className={`text-xs px-2 py-0.5 rounded font-semibold ${q.status==='done'?'bg-emerald-100 text-emerald-700':q.status==='error'?'bg-rose-100 text-rose-600':q.status==='processing'?'bg-indigo-100 text-indigo-700':'bg-slate-200 text-slate-500'}`}>{q.status==='done'?'完成':q.status==='error'?'失敗':q.status==='processing'?'處理中':'待處理'}</span>
+          <span className="flex-1 truncate font-mono text-xs">{q.file.name}</span>
+          {q.result&&<span className="text-xs text-emerald-600">{fmt(q.result.excel_total)}件</span>}
+          {q.error&&<span className="text-xs text-rose-500 truncate max-w-[200px]">{q.error}</span>}
+        </div>)}
+      </div>
+      <div className="flex gap-3">
+        <button onClick={reset} className="px-5 py-2.5 rounded-xl bg-slate-100 text-slate-600 font-semibold text-sm">取消</button>
+        <button onClick={runBatch} disabled={busy} className="flex-1 bg-indigo-600 hover:bg-indigo-700 text-white font-semibold py-2.5 rounded-xl disabled:opacity-60 flex items-center justify-center gap-2">{busy&&<Spinner/>}開始批量匯入</button>
+      </div>
+    </div>}
+
+    {stage==='batch_done'&&<div>
+      <div className="bg-emerald-50 rounded-xl p-5 mb-4">
+        <div className="font-semibold text-emerald-800 mb-3">✅ 批量匯入完成</div>
+        <div className="text-sm text-slate-600">成功 {queue.filter(q=>q.status==='done').length} 個 / 失敗 {queue.filter(q=>q.status==='error').length} 個</div>
+        {queue.filter(q=>q.status==='error').map((q,i)=><div key={i} className="text-xs text-rose-500 mt-1">{q.file.name}: {q.error}</div>)}
+      </div>
+      <button onClick={reset} className="w-full bg-slate-900 text-white font-semibold py-2.5 rounded-xl">再上傳檔案</button>
+    </div>}
 
     {stage==='edit'&&<div>
       <div className="bg-amber-50 border border-amber-200 rounded-xl p-4 mb-3">
         <div className="font-semibold text-amber-800 mb-1">⚠ 核對與修正</div>
         <div className="text-sm text-amber-700">對照 Excel 檢查下表。可直接改任一格、刪除錯誤列、或新增列。確認無誤再入庫。</div>
       </div>
-      {extractMsg&&<div className={`rounded-xl px-4 py-2.5 text-sm mb-3 ${extracting?'bg-indigo-50 text-indigo-700':extractMsg.startsWith('✅')?'bg-emerald-50 text-emerald-700':'bg-amber-50 text-amber-700'}`}>
-        {extracting&&<span className="inline-block mr-2 animate-spin">⟳</span>}{extractMsg}
-      </div>}
+      {extractMsg&&<div className={`rounded-xl px-4 py-2.5 text-sm mb-3 ${extracting?'bg-indigo-50 text-indigo-700':extractMsg.startsWith('✅')?'bg-emerald-50 text-emerald-700':'bg-amber-50 text-amber-700'}`}>{extracting&&<span className="inline-block mr-2 animate-spin">⟳</span>}{extractMsg}</div>}
       <div className="grid grid-cols-2 md:grid-cols-3 gap-3 mb-4">
         <div><label className="text-xs font-semibold text-slate-500">品牌</label><input className={inpL} value={brand} onChange={e=>setBrand(e.target.value)}/></div>
         <div><label className="text-xs font-semibold text-slate-500">月份(淘汰月)</label><input className={inpL} value={period} onChange={e=>setPeriod(e.target.value)}/></div>
         <div><label className="text-xs font-semibold text-slate-500">解禁日(可留空)</label><input type="date" className={inpL} value={release} onChange={e=>setRelease(e.target.value)}/></div>
       </div>
-      <div className="flex items-center justify-between mb-2">
-        <div className="text-sm"><span className="text-slate-500">共 </span><b>{rows.length}</b><span className="text-slate-500"> 列 · 總數量 </span><b className="text-indigo-600 font-mono">{fmt(total)}</b><span className="text-slate-500"> 件</span>
-        {Object.keys(imgMap).length>0&&<span className="ml-2 text-xs text-emerald-600 font-semibold">· 已抽到 {Object.keys(imgMap).length} 款圖片</span>}</div>
+      <div className="flex items-center justify-between mb-2 flex-wrap gap-2">
+        <div className="text-sm flex gap-3 flex-wrap">
+          <span><span className="text-slate-500">共 </span><b>{rows.length}</b><span className="text-slate-500"> 列 · 總 </span><b className="text-indigo-600 font-mono">{fmt(total)}</b><span className="text-slate-500"> 件</span></span>
+          {totalA>0&&<span className="text-emerald-700 font-semibold text-xs bg-emerald-50 px-2 py-1 rounded-lg">A 品 {fmt(totalA)} 件</span>}
+          {totalB>0&&<span className="text-amber-700 font-semibold text-xs bg-amber-50 px-2 py-1 rounded-lg">B 品 {fmt(totalB)} 件</span>}
+          {Object.keys(imgMap).length>0&&<span className="text-violet-600 font-semibold text-xs bg-violet-50 px-2 py-1 rounded-lg">已抽到 {Object.keys(imgMap).length} 款圖片</span>}
+        </div>
         <button onClick={addRow} className="px-3 py-1.5 rounded-lg bg-slate-100 text-slate-600 text-sm font-semibold">+ 新增一列</button>
       </div>
       <div className="overflow-auto border border-slate-100 rounded-xl" style={{maxHeight:380}}>
@@ -462,9 +593,7 @@ function ImportPage(){
       {err&&<div className="mt-4 text-sm text-rose-600 bg-rose-50 rounded-xl px-4 py-3">{err}</div>}
       <div className="flex gap-3 mt-4">
         <button onClick={reset} className="px-5 py-2.5 rounded-xl bg-slate-100 text-slate-600 font-semibold text-sm">取消</button>
-        <button onClick={commit} disabled={busy||extracting} className="flex-1 bg-indigo-600 hover:bg-indigo-700 text-white font-semibold py-2.5 rounded-xl disabled:opacity-60 flex items-center justify-center gap-2">
-          {busy&&<Spinner/>}{extracting?'等待抽圖完成…':`確認無誤,入庫 ${fmt(total)} 件`}
-        </button>
+        <button onClick={commit} disabled={busy||extracting} className="flex-1 bg-indigo-600 hover:bg-indigo-700 text-white font-semibold py-2.5 rounded-xl disabled:opacity-60 flex items-center justify-center gap-2">{busy&&<Spinner/>}{extracting?'等待抽圖完成…':`確認無誤,入庫 ${fmt(total)} 件`}</button>
       </div>
     </div>}
 
@@ -607,9 +736,11 @@ function History(){
   const [brands,setBrands]=useState([]),[msg,setMsg]=useState(null);
   const [edit,setEdit]=useState(null),[newQty,setNewQty]=useState(""),[busy,setBusy]=useState(false);
   const [del,setDel]=useState(null);
+  const [selected,setSelected]=useState(new Set()); // 多選
+  const [batchDelConfirm,setBatchDelConfirm]=useState(false);
   useEffect(()=>{sb.from('v_stock_by_brand').select('brand').then(({data})=>setBrands((data||[]).map(b=>b.brand).filter(Boolean)));},[]);
-  const load=async()=>{try{
-    const {data,error}=await sb.from('v_movement_history').select('*').limit(400);
+  const load=async()=>{setSelected(new Set());try{
+    const {data,error}=await sb.from('v_movement_history').select('*').limit(500);
     if(error)throw error;
     let list=(data||[]);
     if(act)list=list.filter(r=>r.action===act);
@@ -623,10 +754,9 @@ function History(){
     const n=parseInt(newQty);if(isNaN(n)){showMsg("請輸入數字",false);return;}
     setBusy(true);
     try{
-      // 保留原方向(出庫為負)
       const signed=edit.delta_qty<0?-Math.abs(n):Math.abs(n);
       const {data,error}=await sb.rpc('rpc_movement_edit',{p_movement_id:edit.id,p_new_delta:signed});
-      if(error)throw error;showMsg(`已修改 · 該尺碼庫存 ${data}`,true);setEdit(null);load();
+      if(error)throw error;showMsg(`已修改 · 庫存 ${data}`,true);setEdit(null);load();
     }catch(e){showMsg(e.message,false);}
     setBusy(false);
   };
@@ -635,6 +765,21 @@ function History(){
     try{const {error}=await sb.rpc('rpc_movement_delete',{p_movement_id:del.id});if(error)throw error;showMsg("已刪除並連動庫存",true);setDel(null);load();}
     catch(e){showMsg(e.message,false);}
     setBusy(false);
+  };
+  const doBatchDel=async()=>{
+    setBusy(true);setBatchDelConfirm(false);
+    let ok=0,fail=0;
+    for(const id of selected){
+      try{const {error}=await sb.rpc('rpc_movement_delete',{p_movement_id:id});if(error)throw error;ok++;}
+      catch(e){fail++;}
+    }
+    showMsg(`批量刪除完成: 成功${ok} 失敗${fail}`,fail===0);
+    setBusy(false);load();
+  };
+  const toggleSel=(id)=>{const s=new Set(selected);s.has(id)?s.delete(id):s.add(id);setSelected(s);};
+  const toggleAll=()=>{
+    if(selected.size===rows.length)setSelected(new Set());
+    else setSelected(new Set(rows.map(r=>r.id)));
   };
   const sel="bg-white border border-slate-200 text-sm rounded-xl px-4 py-2.5 font-medium focus:ring-2 focus:ring-indigo-100 outline-none";
   const actTag=(a)=>{const m={IN:['入庫','bg-emerald-100 text-emerald-700'],OUT:['出庫','bg-rose-100 text-rose-600'],ADJUST:['調整','bg-indigo-100 text-indigo-700']};const x=m[a]||['?','bg-slate-100'];return <span className={`px-2 py-0.5 rounded text-xs font-semibold ${x[1]}`}>{x[0]}</span>;};
@@ -645,12 +790,17 @@ function History(){
       <select className={sel} value={act} onChange={e=>setAct(e.target.value)}><option value="">全部異動</option><option value="IN">入庫</option><option value="OUT">出庫</option><option value="ADJUST">調整</option></select>
       <input className={sel+" flex-1 min-w-[160px]"} placeholder="搜尋款號/品牌…" value={q} onChange={e=>setQ(e.target.value)}/>
       {rows&&<Pill tone="indigo">{fmt(rows.length)} 筆</Pill>}
+      {selected.size>0&&<button onClick={()=>setBatchDelConfirm(true)} className="px-4 py-2 rounded-xl bg-rose-600 text-white text-sm font-semibold">刪除已選 {selected.size} 筆</button>}
     </div>
-    <div className="px-4 md:px-6 py-2 bg-amber-50 text-xs text-amber-700 border-b border-amber-100">⚠ 編輯數量或刪除紀錄會同步調整庫存,請謹慎操作</div>
+    <div className="px-4 md:px-6 py-2 bg-amber-50 text-xs text-amber-700 border-b border-amber-100">⚠ 編輯數量或刪除紀錄會同步調整庫存，請謹慎操作</div>
     {err&&!edit&&!del?<ErrBox msg={err}/>:!rows?<Loading/>:rows.length===0?<Empty msg="尚無異動紀錄"/>:
     <div className="overflow-auto" style={{maxHeight:520}}><table className="w-full">
-      <thead className="bg-slate-50/80 sticky top-0"><tr>{['時間','異動','品牌','款號','尺碼','數量','異動後','備註','操作'].map((h,i)=><th key={h} className={`px-3 py-3 text-xs font-semibold text-slate-400 ${(i===5||i===6)?'text-right':'text-left'}`}>{h}</th>)}</tr></thead>
-      <tbody className="divide-y divide-slate-50">{rows.map((d,i)=><tr key={i} className="hover:bg-slate-50">
+      <thead className="bg-slate-50/80 sticky top-0"><tr>
+        <th className="px-3 py-3 w-8"><input type="checkbox" checked={selected.size===rows.length&&rows.length>0} onChange={toggleAll} className="rounded"/></th>
+        {['時間','異動','品牌','款號','尺碼','數量','異動後','備註','操作'].map((h,i)=><th key={h} className={`px-3 py-3 text-xs font-semibold text-slate-400 ${(i===5||i===6)?'text-right':'text-left'}`}>{h}</th>)}
+      </tr></thead>
+      <tbody className="divide-y divide-slate-50">{rows.map((d,i)=><tr key={i} className={`hover:bg-slate-50 ${selected.has(d.id)?'bg-rose-50':''}`}>
+        <td className="px-3 py-3"><input type="checkbox" checked={selected.has(d.id)} onChange={()=>toggleSel(d.id)} className="rounded"/></td>
         <td className="px-3 py-3 text-xs text-slate-500 whitespace-nowrap">{dt(d.created_at)}</td>
         <td className="px-3 py-3">{actTag(d.action)}</td>
         <td className="px-3 py-3 text-sm">{d.brand||'—'}</td>
@@ -665,12 +815,22 @@ function History(){
         </td></tr>)}</tbody>
     </table></div>}
   </Card>
+  {batchDelConfirm&&<div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4" onClick={()=>!busy&&setBatchDelConfirm(false)}>
+    <Card className="w-full max-w-md p-6"><div onClick={e=>e.stopPropagation()}>
+      <h3 className="font-display font-bold text-lg mb-1 text-rose-600">批量刪除確認</h3>
+      <div className="text-sm text-slate-600 mb-2">共選取 <b>{selected.size}</b> 筆紀錄</div>
+      <div className="bg-rose-50 rounded-lg px-3 py-2 text-xs text-rose-600 mb-5">每筆刪除後庫存會連動回沖，此動作無法復原。</div>
+      <div className="flex gap-3">
+        <button onClick={()=>setBatchDelConfirm(false)} disabled={busy} className="px-5 py-2.5 rounded-xl bg-slate-100 text-slate-600 font-semibold text-sm">取消</button>
+        <button onClick={doBatchDel} disabled={busy} className="flex-1 bg-rose-600 hover:bg-rose-700 text-white font-semibold py-2.5 rounded-xl disabled:opacity-60 flex items-center justify-center gap-2">{busy&&<Spinner/>}確認批量刪除</button>
+      </div>
+    </div></Card>
+  </div>}
   {edit&&<div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4" onClick={()=>!busy&&setEdit(null)}>
     <Card className="w-full max-w-md p-6"><div onClick={e=>e.stopPropagation()}>
       <h3 className="font-display font-bold text-lg mb-1">編輯異動數量</h3>
-      <div className="text-sm text-slate-500 mb-2 font-mono">{edit.style_no} · {edit.size_label} · {edit.action==='OUT'?'出庫':edit.action==='IN'?'入庫':'調整'}</div>
-      <div className="bg-amber-50 rounded-lg px-3 py-2 text-xs text-amber-700 mb-4">原數量 {Math.abs(edit.delta_qty)},改後庫存會自動連動調整。</div>
-      <label className="block text-sm font-semibold text-slate-600 mb-1.5">新數量(填正數,方向不變)</label>
+      <div className="text-sm text-slate-500 mb-2 font-mono">{edit.style_no} · {edit.size_label} · 原數量 {Math.abs(edit.delta_qty)}</div>
+      <div className="bg-amber-50 rounded-lg px-3 py-2 text-xs text-amber-700 mb-4">改後庫存會自動連動調整。</div>
       <input autoFocus type="number" min="0" value={newQty} onChange={e=>setNewQty(e.target.value)} className={sel+" w-full mb-5 font-mono"}/>
       <div className="flex gap-3">
         <button onClick={()=>setEdit(null)} disabled={busy} className="px-5 py-2.5 rounded-xl bg-slate-100 text-slate-600 font-semibold text-sm">取消</button>
@@ -682,7 +842,7 @@ function History(){
     <Card className="w-full max-w-md p-6"><div onClick={e=>e.stopPropagation()}>
       <h3 className="font-display font-bold text-lg mb-1 text-rose-600">刪除這筆紀錄?</h3>
       <div className="text-sm text-slate-600 mb-2 font-mono">{del.style_no} · {del.size_label} · {del.action==='OUT'?'出庫':del.action==='IN'?'入庫':'調整'} {Math.abs(del.delta_qty)}</div>
-      <div className="bg-rose-50 rounded-lg px-3 py-2 text-xs text-rose-600 mb-5">刪除後,這筆異動對庫存的影響會被回沖。此動作無法復原。</div>
+      <div className="bg-rose-50 rounded-lg px-3 py-2 text-xs text-rose-600 mb-5">刪除後庫存會被回沖，此動作無法復原。</div>
       <div className="flex gap-3">
         <button onClick={()=>setDel(null)} disabled={busy} className="px-5 py-2.5 rounded-xl bg-slate-100 text-slate-600 font-semibold text-sm">取消</button>
         <button onClick={doDel} disabled={busy} className="flex-1 bg-rose-600 hover:bg-rose-700 text-white font-semibold py-2.5 rounded-xl disabled:opacity-60 flex items-center justify-center gap-2">{busy&&<Spinner/>}確認刪除</button>
