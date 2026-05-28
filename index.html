@@ -33,6 +33,7 @@
   window.CONFIG = {
     SUPABASE_URL: "https://fuuinvuimfrhaddmkjbw.supabase.co",
     SUPABASE_ANON: "sb_publishable_vvaUw3iZqDV5-U-DpLbUDA_qQYHukln",
+    BACKEND_URL: "https://stocksense-backend-bx3i.onrender.com",
   };
 </script>
 
@@ -320,71 +321,120 @@ function ImportPage(){
   const [file,setFile]=useState(null),[rows,setRows]=useState([]);
   const [brand,setBrand]=useState(""),[period,setPeriod]=useState(""),[release,setRelease]=useState("");
   const [result,setResult]=useState(null);
+  const [imgMap,setImgMap]=useState({}); // style_no -> image_url (從後端抽圖)
+  const [extracting,setExtracting]=useState(false),[extractMsg,setExtractMsg]=useState("");
   const PRINT_OPTS=["","有印花繡花","無印花繡花"];
+
   const onFile=async(e)=>{
     const f=e.target.files[0];if(!f)return;
-    setBusy(true);setErr("");setResult(null);
+    setBusy(true);setErr("");setResult(null);setImgMap({});setExtractMsg("");
     try{
+      // 1. 解析 Excel 資料(前端)
       const buf=await f.arrayBuffer();
       const r=window.parseCartersWorkbook(buf,f.name);
       if(!r.length)throw new Error("這個檔案解析不到資料,請確認格式");
-      // 正規化印花值
       r.forEach(x=>{const p=x.print_mark||"";x.print_mark=/有|印|绣|繡|花/.test(p)&&!/無|无/.test(p)?"有印花繡花":(/無|无/.test(p)?"無印花繡花":"");});
       setFile(f);setRows(r);
       setBrand(window.brandFromFilename(f.name));
       setPeriod(window.periodFromFilename(f.name));setRelease("");
       setStage('edit');
+      // 2. 同時送到後端抽圖(非同步,不阻擋核對)
+      extractImages(f);
     }catch(ex){setErr(ex.message);}
     setBusy(false);e.target.value="";
   };
+
+  const extractImages=async(f)=>{
+    if(!window.CONFIG.BACKEND_URL)return;
+    setExtracting(true);setExtractMsg("後端抽圖中…");
+    try{
+      const session=await sb.auth.getSession();
+      const token=session?.data?.session?.access_token;
+      if(!token){setExtractMsg("⚠ 無法取得登入 token,跳過自動抽圖");setExtracting(false);return;}
+      const fd=new FormData();fd.append('file',f);
+      const res=await fetch(`${window.CONFIG.BACKEND_URL}/extract`,{
+        method:'POST',headers:{Authorization:`Bearer ${token}`},body:fd});
+      if(!res.ok){const t=await res.text();throw new Error(`後端回應${res.status}: ${t.slice(0,100)}`);}
+      const data=await res.json();
+      if(data.ok&&data.results){
+        const m={};
+        data.results.forEach(r=>{if(r.image_url)m[r.style_no]=r.image_url;});
+        setImgMap(m);
+        setExtractMsg(`✅ 自動抽圖完成:${data.uploaded}/${data.extracted} 張已上傳`);
+      }
+    }catch(ex){setExtractMsg(`⚠ 自動抽圖失敗(可手動補):${ex.message.slice(0,80)}`);}
+    setExtracting(false);
+  };
+
   const total=rows.reduce((s,r)=>s+(parseInt(r.qty)||0),0);
   const setCell=(i,k,v)=>{const n=[...rows];n[i]={...n[i],[k]:v};setRows(n);};
   const delRow=(i)=>setRows(rows.filter((_,j)=>j!==i));
   const addRow=()=>setRows([...rows,{brand,period,line:"",grade:"A",style_no:"",part:"",color_code:"",color_desc:"",size:"",qty:0,print_mark:""}]);
+
   const commit=async()=>{
     setBusy(true);setErr("");
     try{
-      const clean=rows.filter(r=>r.style_no&&parseInt(r.qty)>0).map(r=>({...r,qty:parseInt(r.qty),brand}));
+      const clean=rows.filter(r=>r.style_no&&parseInt(r.qty)>0).map(r=>{
+        const img=imgMap[r.style_no];
+        return {...r,qty:parseInt(r.qty),brand,image_url:img||null};
+      });
       if(!clean.length)throw new Error("沒有有效資料列(需有款號且數量>0)");
       const {data,error}=await sb.rpc('rpc_import_commit',{
         p_filename:file.name,p_brand:brand,p_period:period,
-        p_release_date:release||null,p_records:clean,p_expected_total:clean.reduce((s,r)=>s+r.qty,0)});
+        p_release_date:release||null,p_records:clean,
+        p_expected_total:clean.reduce((s,r)=>s+r.qty,0)});
       if(error)throw error;
+      // 把抽到的圖片 URL 寫進 products
+      if(Object.keys(imgMap).length>0){
+        for(const [sno,url] of Object.entries(imgMap)){
+          await sb.from('products').update({image_url:url}).eq('style_no',sno).is('image_url',null);
+        }
+      }
       setResult(data);setStage('done');
     }catch(ex){setErr(ex.message);}
     setBusy(false);
   };
-  const reset=()=>{setStage('idle');setFile(null);setRows([]);setResult(null);setErr("");};
+
+  const reset=()=>{setStage('idle');setFile(null);setRows([]);setResult(null);setErr("");setImgMap({});setExtractMsg("");};
   const inp="bg-white border border-slate-200 text-sm rounded-lg px-2 py-1.5 focus:ring-2 focus:ring-indigo-100 outline-none w-full";
   const inpL="bg-white border border-slate-200 text-sm rounded-xl px-4 py-2.5 font-medium focus:ring-2 focus:ring-indigo-100 outline-none w-full";
 
   return <div className="p-4 md:p-8"><Card className="p-5 md:p-7 max-w-6xl">
     <h3 className="font-display font-bold text-lg mb-2">上傳月度庫存 Excel</h3>
-    <p className="text-sm text-slate-500 mb-5">流程:選檔解析 → 核對/修正每筆(系統識別不一定準,可改可刪可新增,印花欄請對照補) → 設品牌與解禁日 → 確認入庫。</p>
+    <p className="text-sm text-slate-500 mb-5">上傳後系統自動解析資料並抽取 Excel 內嵌圖片,在核對畫面確認無誤後入庫。</p>
 
     {stage==='idle'&&<label className="block border-2 border-dashed border-slate-200 rounded-2xl p-10 text-center cursor-pointer hover:border-indigo-300 hover:bg-indigo-50/30 transition-colors">
       <input type="file" accept=".xls,.xlsx" onChange={onFile} className="hidden" disabled={busy}/>
       {busy?<div className="flex flex-col items-center gap-3 text-indigo-600"><Spinner/><span className="text-sm font-semibold">解析中…</span></div>:
-      <div className="flex flex-col items-center gap-2 text-slate-500"><svg width="36" height="36" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.6"><path d="M12 16V4m0 0L8 8m4-4l4 4M4 20h16" strokeLinecap="round" strokeLinejoin="round"/></svg><span className="text-sm font-semibold">點擊選擇 .xls / .xlsx 檔案</span></div>}
+      <div className="flex flex-col items-center gap-2 text-slate-500">
+        <svg width="36" height="36" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.6"><path d="M12 16V4m0 0L8 8m4-4l4 4M4 20h16" strokeLinecap="round" strokeLinejoin="round"/></svg>
+        <span className="text-sm font-semibold">點擊選擇 .xls / .xlsx 檔案</span>
+        <span className="text-xs text-slate-400">系統會自動抽取 Excel 內的款式圖片並對應款號</span>
+      </div>}
     </label>}
 
     {stage==='edit'&&<div>
-      <div className="bg-amber-50 border border-amber-200 rounded-xl p-4 mb-4">
+      <div className="bg-amber-50 border border-amber-200 rounded-xl p-4 mb-3">
         <div className="font-semibold text-amber-800 mb-1">⚠ 核對與修正</div>
-        <div className="text-sm text-amber-700">對照你的 Excel 檢查下表。可直接改任一格、刪除錯誤列、或新增列。印花欄請對照補上。確認無誤再入庫。</div>
+        <div className="text-sm text-amber-700">對照 Excel 檢查下表。可直接改任一格、刪除錯誤列、或新增列。確認無誤再入庫。</div>
       </div>
+      {extractMsg&&<div className={`rounded-xl px-4 py-2.5 text-sm mb-3 ${extracting?'bg-indigo-50 text-indigo-700':extractMsg.startsWith('✅')?'bg-emerald-50 text-emerald-700':'bg-amber-50 text-amber-700'}`}>
+        {extracting&&<span className="inline-block mr-2 animate-spin">⟳</span>}{extractMsg}
+      </div>}
       <div className="grid grid-cols-2 md:grid-cols-3 gap-3 mb-4">
         <div><label className="text-xs font-semibold text-slate-500">品牌</label><input className={inpL} value={brand} onChange={e=>setBrand(e.target.value)}/></div>
         <div><label className="text-xs font-semibold text-slate-500">月份(淘汰月)</label><input className={inpL} value={period} onChange={e=>setPeriod(e.target.value)}/></div>
         <div><label className="text-xs font-semibold text-slate-500">解禁日(可留空)</label><input type="date" className={inpL} value={release} onChange={e=>setRelease(e.target.value)}/></div>
       </div>
       <div className="flex items-center justify-between mb-2">
-        <div className="text-sm"><span className="text-slate-500">共 </span><b>{rows.length}</b><span className="text-slate-500"> 列 · 總數量 </span><b className="text-indigo-600 font-mono">{fmt(total)}</b><span className="text-slate-500"> 件</span></div>
+        <div className="text-sm"><span className="text-slate-500">共 </span><b>{rows.length}</b><span className="text-slate-500"> 列 · 總數量 </span><b className="text-indigo-600 font-mono">{fmt(total)}</b><span className="text-slate-500"> 件</span>
+        {Object.keys(imgMap).length>0&&<span className="ml-2 text-xs text-emerald-600 font-semibold">· 已抽到 {Object.keys(imgMap).length} 款圖片</span>}</div>
         <button onClick={addRow} className="px-3 py-1.5 rounded-lg bg-slate-100 text-slate-600 text-sm font-semibold">+ 新增一列</button>
       </div>
       <div className="overflow-auto border border-slate-100 rounded-xl" style={{maxHeight:380}}>
-        <table className="w-full text-sm"><thead className="bg-slate-50 sticky top-0"><tr>{['產品線','款號','色號','顏色','等級','尺碼','數量','印花','刪'].map(h=><th key={h} className="px-2 py-2 text-xs font-semibold text-slate-400 whitespace-nowrap">{h}</th>)}</tr></thead>
-        <tbody>{rows.map((r,i)=><tr key={i} className="border-t border-slate-50">
+        <table className="w-full text-sm"><thead className="bg-slate-50 sticky top-0"><tr>{['圖','產品線','款號','色號','顏色','等級','尺碼','數量','印花','刪'].map(h=><th key={h} className="px-2 py-2 text-xs font-semibold text-slate-400 whitespace-nowrap">{h}</th>)}</tr></thead>
+        <tbody>{rows.map((r,i)=>{const img=imgMap[r.style_no];return <tr key={i} className="border-t border-slate-50">
+          <td className="px-1 py-1 w-12">{img?<img src={img} className="w-10 h-10 object-cover rounded-lg" alt=""/>:<div className="w-10 h-10 rounded-lg bg-slate-100 flex items-center justify-center text-slate-300 text-xs">無圖</div>}</td>
           <td className="px-1 py-1"><input className={inp+" w-20"} value={r.line||''} onChange={e=>setCell(i,'line',e.target.value)}/></td>
           <td className="px-1 py-1"><input className={inp+" w-24 font-mono"} value={r.style_no||''} onChange={e=>setCell(i,'style_no',e.target.value)}/></td>
           <td className="px-1 py-1"><input className={inp+" w-16 font-mono"} value={r.color_code||''} onChange={e=>setCell(i,'color_code',e.target.value)}/></td>
@@ -394,12 +444,15 @@ function ImportPage(){
           <td className="px-1 py-1"><input type="number" className={inp+" w-16 font-mono"} value={r.qty||0} onChange={e=>setCell(i,'qty',e.target.value)}/></td>
           <td className="px-1 py-1"><select className={inp+" w-28"} value={r.print_mark||''} onChange={e=>setCell(i,'print_mark',e.target.value)}>{PRINT_OPTS.map(o=><option key={o} value={o}>{o||'未標記'}</option>)}</select></td>
           <td className="px-1 py-1 text-center"><button onClick={()=>delRow(i)} className="text-rose-400 hover:text-rose-600 font-bold">✕</button></td>
-        </tr>)}</tbody></table>
+        </tr>;})}
+        </tbody></table>
       </div>
       {err&&<div className="mt-4 text-sm text-rose-600 bg-rose-50 rounded-xl px-4 py-3">{err}</div>}
       <div className="flex gap-3 mt-4">
         <button onClick={reset} className="px-5 py-2.5 rounded-xl bg-slate-100 text-slate-600 font-semibold text-sm">取消</button>
-        <button onClick={commit} disabled={busy} className="flex-1 bg-indigo-600 hover:bg-indigo-700 text-white font-semibold py-2.5 rounded-xl disabled:opacity-60 flex items-center justify-center gap-2">{busy&&<Spinner/>}確認無誤,入庫 {fmt(total)} 件</button>
+        <button onClick={commit} disabled={busy||extracting} className="flex-1 bg-indigo-600 hover:bg-indigo-700 text-white font-semibold py-2.5 rounded-xl disabled:opacity-60 flex items-center justify-center gap-2">
+          {busy&&<Spinner/>}{extracting?'等待抽圖完成…':`確認無誤,入庫 ${fmt(total)} 件`}
+        </button>
       </div>
     </div>}
 
@@ -412,7 +465,7 @@ function ImportPage(){
           <div><span className="text-slate-500">新增</span><div className="font-mono font-bold text-emerald-600">{fmt(result.new_items)}</div></div>
           <div><span className="text-slate-500">覆蓋</span><div className="font-mono font-bold text-indigo-600">{fmt(result.covered)}</div></div>
           <div><span className="text-slate-500">解禁日</span><div className="font-mono font-bold">{result.release_date||'未設定'}</div></div>
-          <div><span className="text-slate-500">系統總庫存</span><div className="font-mono font-extrabold">{fmt(result.system_total)}</div></div>
+          <div><span className="text-slate-500">抽圖</span><div className="font-mono font-bold text-violet-600">{Object.keys(imgMap).length} 款</div></div>
         </div>
       </div>
       <button onClick={reset} className="w-full bg-slate-900 text-white font-semibold py-2.5 rounded-xl">再上傳一個檔案</button>
