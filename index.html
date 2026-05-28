@@ -20,7 +20,7 @@
   .spin{animation:spin 1s linear infinite}@keyframes spin{to{transform:rotate(360deg)}}
   .font-display{font-family:'Sora',sans-serif}.font-mono{font-family:'JetBrains Mono',monospace}
 </style>
-<script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/html2pdf.js/0.10.1/html2pdf.bundle.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
 </head>
 <body class="text-slate-900 antialiased">
@@ -324,38 +324,59 @@ function Inventory(){
     if(!data||!data.length){alert('沒有資料可導出');return;}
     setExporting(true);
     try{
-      const {jsPDF}=window.jspdf;
-      const doc=new jsPDF({orientation:'landscape',unit:'mm',format:'a4'});
-      const pageW=297,pageH=210,margin=10,rowH=22,headerH=9;
-      const cols=[{h:'圖片',w:22},{h:'品牌',w:22},{h:'款號',w:28},{h:'色號',w:16},{h:'顏色',w:30},{h:'等級',w:12},{h:'印花',w:22},{h:'尺碼',w:14},{h:'來源檔',w:35},{h:'件數',w:16}];
-      let y=margin;
-      doc.setFontSize(13);doc.text('StockSense 庫存報表',margin,y);y+=7;
-      doc.setFontSize(8);doc.text('導出:'+new Date().toLocaleString('zh-TW')+' / 共'+data.length+'筆',margin,y);y+=6;
-      const drawHeader=()=>{
-        doc.setFillColor(235,235,250);doc.rect(margin,y,pageW-2*margin,headerH,'F');
-        doc.setFontSize(7);doc.setTextColor(60,60,120);
-        let x=margin;cols.forEach(c=>{doc.text(c.h,x+1,y+6);x+=c.w;});
-        doc.setTextColor(40,40,40);y+=headerH;
-      };
-      drawHeader();
-      for(const d of data){
-        if(y+rowH>pageH-margin){doc.addPage();y=margin;drawHeader();}
-        const ry=y;
-        if(d.image_url){try{
-          const rsp=await fetch(d.image_url);const bl=await rsp.blob();
-          await new Promise(res=>{const fr=new FileReader();fr.onload=ev=>{try{doc.addImage(ev.target.result,'PNG',margin+0.5,ry+0.5,19,19);}catch(e){}res();};fr.onerror=res;fr.readAsDataURL(bl);});
-        }catch(e){}}
-        doc.setFontSize(6.5);
-        const vals=['',d.brand||'',d.style_no+(d.part?'/'+d.part:''),d.color_code||'',d.color_desc||'',d.grade||'',d.print_mark||'',d.size_label||'',d.last_filename||'',(d.total_qty||0).toString()];
-        let x=margin;
-        vals.forEach((v,i)=>{
-          if(i>0){const t=v.length>13?v.slice(0,12)+'…':v;doc.text(t,x+1,ry+12);}
-          x+=cols[i].w;
-        });
-        doc.setDrawColor(210,210,225);doc.line(margin,ry+rowH,pageW-margin,ry+rowH);
-        y+=rowH;
-      }
-      doc.save('StockSense_庫存_'+new Date().toISOString().slice(0,10)+'.pdf');
+      // 建立暫存 DOM 元素渲染 PDF 內容
+      const container=document.createElement('div');
+      container.style.cssText='position:fixed;top:-9999px;left:-9999px;width:1000px;background:white;padding:20px;font-family:sans-serif;';
+      // 標題
+      container.innerHTML=`<div style="font-size:18px;font-weight:bold;margin-bottom:8px">StockSense 庫存報表</div>
+        <div style="font-size:12px;color:#666;margin-bottom:16px">導出時間: ${new Date().toLocaleString('zh-TW')} / 共 ${data.length} 筆</div>`;
+      // 等所有圖片載入完再截圖
+      const imgProms=[];
+      const rows=data.map(d=>{
+        const imgId='img_'+Math.random().toString(36).slice(2);
+        const imgHtml=d.image_url
+          ?`<img id="${imgId}" src="${d.image_url}" crossorigin="anonymous" style="width:60px;height:60px;object-fit:cover;border-radius:4px" onerror="this.style.display='none'">`
+          :`<div style="width:60px;height:60px;background:#f1f5f9;border-radius:4px;display:flex;align-items:center;justify-content:center;font-size:10px;color:#94a3b8">無圖</div>`;
+        return `<tr style="border-bottom:1px solid #e2e8f0">
+          <td style="padding:6px 8px;width:70px">${imgHtml}</td>
+          <td style="padding:6px 8px;font-size:12px">${d.brand||''}</td>
+          <td style="padding:6px 8px;font-size:12px;font-family:monospace">${d.style_no||''}${d.part?'/'+d.part:''}</td>
+          <td style="padding:6px 8px;font-size:12px">${d.color_code||''}</td>
+          <td style="padding:6px 8px;font-size:12px">${d.color_desc||''}</td>
+          <td style="padding:6px 8px;font-size:12px">${d.grade||''}</td>
+          <td style="padding:6px 8px;font-size:12px">${d.print_mark||''}</td>
+          <td style="padding:6px 8px;font-size:12px">${d.size_label||''}</td>
+          <td style="padding:6px 8px;font-size:12px">${d.total_qty||0}</td>
+        </tr>`;
+      });
+      const table=document.createElement('table');
+      table.style.cssText='width:100%;border-collapse:collapse;';
+      table.innerHTML=`<thead><tr style="background:#f8fafc">
+        <th style="padding:8px;font-size:12px;text-align:left">圖片</th>
+        <th style="padding:8px;font-size:12px;text-align:left">品牌</th>
+        <th style="padding:8px;font-size:12px;text-align:left">款號</th>
+        <th style="padding:8px;font-size:12px;text-align:left">色號</th>
+        <th style="padding:8px;font-size:12px;text-align:left">顏色</th>
+        <th style="padding:8px;font-size:12px;text-align:left">等級</th>
+        <th style="padding:8px;font-size:12px;text-align:left">印花</th>
+        <th style="padding:8px;font-size:12px;text-align:left">尺碼</th>
+        <th style="padding:8px;font-size:12px;text-align:left">件數</th>
+      </tr></thead><tbody>${rows.join('')}</tbody>`;
+      container.appendChild(table);
+      document.body.appendChild(container);
+      // 等圖片載入
+      const imgs=container.querySelectorAll('img');
+      await Promise.allSettled(Array.from(imgs).map(img=>new Promise(res=>{
+        if(img.complete)res();else{img.onload=res;img.onerror=res;}
+      })));
+      await html2pdf().set({
+        margin:[10,10],
+        filename:'StockSense_庫存_'+new Date().toISOString().slice(0,10)+'.pdf',
+        image:{type:'jpeg',quality:0.92},
+        html2canvas:{scale:1.5,useCORS:true,logging:false},
+        jsPDF:{unit:'mm',format:'a3',orientation:'landscape'}
+      }).from(container).save();
+      document.body.removeChild(container);
     }catch(e){alert('PDF導出失敗:'+e.message);}
     setExporting(false);
   };
@@ -768,11 +789,13 @@ function History(){
   };
   const doBatchDel=async()=>{
     setBusy(true);setBatchDelConfirm(false);
-    let ok=0,fail=0;
-    for(const id of selected){
-      try{const {error}=await sb.rpc('rpc_movement_delete',{p_movement_id:id});if(error)throw error;ok++;}
-      catch(e){fail++;}
-    }
+    const ids=[...selected];
+    // 並發刪除,不用逐筆等
+    const results=await Promise.allSettled(
+      ids.map(id=>sb.rpc('rpc_movement_delete',{p_movement_id:id}))
+    );
+    const ok=results.filter(r=>r.status==='fulfilled'&&!r.value.error).length;
+    const fail=results.length-ok;
     showMsg(`批量刪除完成: 成功${ok} 失敗${fail}`,fail===0);
     setBusy(false);load();
   };
