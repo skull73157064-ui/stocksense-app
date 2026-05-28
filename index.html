@@ -221,6 +221,7 @@ function Login(){
 function Overview(){
   const [d,setD]=useState(null),[err,setErr]=useState("");
   const [fBrand,setFBrand]=useState(''),[fPeriod,setFPeriod]=useState('');
+  const [brandMgmt,setBrandMgmt]=useState(false),[editingBrand,setEditingBrand]=useState(null),[newBrandName,setNewBrandName]=useState("");
   useEffect(()=>{(async()=>{
     try{
       const {data:bb,error:e1}=await sb.from('v_stock_by_brand').select('*');if(e1)throw e1;
@@ -253,18 +254,7 @@ function Overview(){
   const kpis=filtered
     ? [['篩選後庫存',fmt(fTotal),'PCS','text-indigo-600'],['批次數',fmt(fb.length),'批','text-sky-600'],['品牌數',fmt(new Set(fb.map(b=>b.brand)).size),'個','text-emerald-600']]
     : [['當前總庫存',fmt(d.total),'PCS','text-indigo-600'],['A 品庫存',fmt(d.A),'PCS','text-emerald-600'],['B 品庫存',fmt(d.B),'PCS','text-amber-600']];
-  const [brandMgmt,setBrandMgmt]=useState(false);
-  const [editingBrand,setEditingBrand]=useState(null);
-  const [newBrandName,setNewBrandName]=useState("");
-  const renameBrand=async(oldName,newName)=>{
-    if(!newName.trim()||newName===oldName)return;
-    try{
-      await sb.from('brands').update({name:newName}).eq('name',oldName);
-      await sb.from('import_batches').update({brand:newName}).eq('brand',oldName);
-      setEditingBrand(null);setNewBrandName("");
-      setD(null);
-    }catch(e){alert('更新失敗:'+e.message);}
-  };
+  const renameBrand=async(on,nn)=>{if(!nn.trim()||nn===on)return;try{await sb.from('brands').update({name:nn}).eq('name',on);await sb.from('import_batches').update({brand:nn}).eq('brand',on);setEditingBrand(null);setNewBrandName("");setD(null);}catch(e){alert('更新失敗:'+e.message);}};;
   const sel="bg-white border border-slate-200 text-sm rounded-xl px-4 py-2.5 font-medium focus:ring-2 focus:ring-indigo-100 outline-none";
   return <div className="p-4 md:p-8 space-y-4 md:space-y-6">
     <Card className="p-4 md:p-5"><div className="flex flex-wrap gap-3 items-center">
@@ -274,16 +264,7 @@ function Overview(){
       {filtered&&<button onClick={()=>{setFBrand('');setFPeriod('');}} className="text-sm text-indigo-600 font-semibold">清除篩選</button>}
       <button onClick={()=>setBrandMgmt(!brandMgmt)} className="ml-auto text-xs font-semibold text-slate-500 hover:text-indigo-600">⚙ 管理品牌</button>
     </div>
-    {brandMgmt&&<div className="mt-3 pt-3 border-t border-slate-100">
-      <div className="text-xs font-semibold text-slate-400 mb-2">品牌名稱管理(點擊可重新命名)</div>
-      <div className="flex flex-wrap gap-2">{allBrands.map(b=><div key={b} className="flex items-center gap-1.5">
-        {editingBrand===b
-          ?<><input autoFocus value={newBrandName} onChange={e=>setNewBrandName(e.target.value)} onKeyDown={e=>e.key==='Enter'&&renameBrand(b,newBrandName)} className="text-xs border border-indigo-300 rounded-lg px-2 py-1 w-28 outline-none" placeholder={b}/>
-            <button onClick={()=>renameBrand(b,newBrandName)} className="text-xs text-indigo-600 font-semibold">確認</button>
-            <button onClick={()=>setEditingBrand(null)} className="text-xs text-slate-400">取消</button></>
-          :<button onClick={()=>{setEditingBrand(b);setNewBrandName(b);}} className="text-xs bg-slate-100 hover:bg-indigo-50 text-slate-700 px-3 py-1.5 rounded-lg font-semibold">✏ {b}</button>}
-      </div>)}</div>
-    </div>}
+    {brandMgmt&&<div className="mt-3 pt-3 border-t border-slate-100"><div className="text-xs font-semibold text-slate-400 mb-2">點擊品牌名稱可重新命名</div><div className="flex flex-wrap gap-2">{allBrands.map(b=><div key={b} className="flex items-center gap-1.5">{editingBrand===b?<><input autoFocus value={newBrandName} onChange={e=>setNewBrandName(e.target.value)} onKeyDown={e=>e.key==='Enter'&&renameBrand(b,newBrandName)} className="text-xs border border-indigo-300 rounded-lg px-2 py-1 w-28 outline-none"/><button onClick={()=>renameBrand(b,newBrandName)} className="text-xs text-indigo-600 font-semibold">確認</button><button onClick={()=>setEditingBrand(null)} className="text-xs text-slate-400">取消</button></>:<button onClick={()=>{setEditingBrand(b);setNewBrandName(b);}} className="text-xs bg-slate-100 hover:bg-indigo-50 text-slate-700 px-3 py-1.5 rounded-lg font-semibold">✏ {b}</button>}</div>)}</div></div>}
     </Card>
     <div className="grid grid-cols-1 sm:grid-cols-3 gap-4 md:gap-6 fade-up">
       {kpis.map(([l,v,u,c])=><Card key={l} className="p-5 md:p-6"><div className="text-xs font-semibold text-slate-400 uppercase tracking-wide mb-3">{l}</div><div className="flex items-baseline gap-1.5"><span className={`font-mono font-extrabold text-2xl md:text-3xl ${c}`}>{v}</span><span className="text-sm text-slate-400">{u}</span></div></Card>)}
@@ -348,54 +329,19 @@ function Inventory(){
     if(!data||!data.length){alert('沒有資料可導出');return;}
     setExporting(true);
     try{
-      // 建立暫存 DOM 元素渲染 PDF 內容
       const container=document.createElement('div');
       container.style.cssText='position:absolute;top:0;left:0;width:1000px;background:white;padding:20px;font-family:sans-serif;visibility:hidden;z-index:-9999;';
       document.body.style.position='relative';
-      // 標題
-      container.innerHTML=`<div style="font-size:18px;font-weight:bold;margin-bottom:8px">StockSense 庫存報表</div>
-        <div style="font-size:12px;color:#666;margin-bottom:16px">導出時間: ${new Date().toLocaleString('zh-TW')} / 共 ${data.length} 筆</div>`;
-      // 等所有圖片載入完再截圖
-      const imgProms=[];
-      const rows=data.map(d=>{
-        const imgId='img_'+Math.random().toString(36).slice(2);
-        const imgHtml=d.image_url
-          ?`<img id="${imgId}" src="${d.image_url}" crossorigin="anonymous" style="width:60px;height:60px;object-fit:cover;border-radius:4px" onerror="this.style.display='none'">`
-          :`<div style="width:60px;height:60px;background:#f1f5f9;border-radius:4px;display:flex;align-items:center;justify-content:center;font-size:10px;color:#94a3b8">無圖</div>`;
-        return `<tr style="border-bottom:1px solid #e2e8f0">
-          <td style="padding:6px 8px;width:70px">${imgHtml}</td>
-          <td style="padding:6px 8px;font-size:12px">${d.brand||''}</td>
-          <td style="padding:6px 8px;font-size:12px;font-family:monospace">${d.style_no||''}${d.part?'/'+d.part:''}</td>
-          <td style="padding:6px 8px;font-size:12px">${d.color_code||''}</td>
-          <td style="padding:6px 8px;font-size:12px">${d.color_desc||''}</td>
-          <td style="padding:6px 8px;font-size:12px">${d.grade||''}</td>
-          <td style="padding:6px 8px;font-size:12px">${d.print_mark||''}</td>
-          <td style="padding:6px 8px;font-size:12px">${d.size_label||''}</td>
-          <td style="padding:6px 8px;font-size:12px">${d.total_qty||0}</td>
-        </tr>`;
-      });
-      const table=document.createElement('table');
-      table.style.cssText='width:100%;border-collapse:collapse;';
-      table.innerHTML=`<thead><tr style="background:#f8fafc">
-        <th style="padding:8px;font-size:12px;text-align:left">圖片</th>
-        <th style="padding:8px;font-size:12px;text-align:left">品牌</th>
-        <th style="padding:8px;font-size:12px;text-align:left">款號</th>
-        <th style="padding:8px;font-size:12px;text-align:left">色號</th>
-        <th style="padding:8px;font-size:12px;text-align:left">顏色</th>
-        <th style="padding:8px;font-size:12px;text-align:left">等級</th>
-        <th style="padding:8px;font-size:12px;text-align:left">印花</th>
-        <th style="padding:8px;font-size:12px;text-align:left">尺碼</th>
-        <th style="padding:8px;font-size:12px;text-align:left">件數</th>
-      </tr></thead><tbody>${rows.join('')}</tbody>`;
-      container.appendChild(table);
+      container.innerHTML=`<div style="font-size:18px;font-weight:bold;margin-bottom:8px">StockSense 庫存報表</div><div style="font-size:12px;color:#666;margin-bottom:16px">導出時間: ${new Date().toLocaleString('zh-TW')} / 共 ${data.length} 筆</div>`;
+      const tbl=document.createElement('table');
+      tbl.style.cssText='width:100%;border-collapse:collapse;font-size:11px;';
+      tbl.innerHTML=`<thead><tr style="background:#f1f5f9">${['圖片','品牌','款號','色號','顏色','等級','印花','尺碼','件數'].map(h=>`<th style="padding:6px 8px;text-align:left;font-weight:600">${h}</th>`).join('')}</tr></thead><tbody>${data.map(d=>`<tr style="border-bottom:1px solid #e2e8f0"><td style="padding:4px 8px">${d.image_url?`<img src="${d.image_url}" crossorigin="anonymous" style="width:55px;height:55px;object-fit:cover;border-radius:4px" onerror="this.style.display='none'">`:'<div style="width:55px;height:55px;background:#f1f5f9;border-radius:4px;display:flex;align-items:center;justify-content:center;font-size:9px;color:#94a3b8">無圖</div>'}</td><td style="padding:4px 8px">${d.brand||''}</td><td style="padding:4px 8px;font-family:monospace">${d.style_no||''}${d.part?'/'+d.part:''}</td><td style="padding:4px 8px">${d.color_code||''}</td><td style="padding:4px 8px">${d.color_desc||''}</td><td style="padding:4px 8px">${d.grade||''}</td><td style="padding:4px 8px">${d.print_mark||''}</td><td style="padding:4px 8px">${d.size_label||''}</td><td style="padding:4px 8px;font-weight:bold">${d.total_qty||0}</td></tr>`).join('')}</tbody>`;
+      container.appendChild(tbl);
       document.body.appendChild(container);
-      // 等圖片載入
       const imgs=container.querySelectorAll('img');
-      await Promise.allSettled(Array.from(imgs).map(img=>new Promise(res=>{
-        if(img.complete)res();else{img.onload=res;img.onerror=res;}
-      })));
+      await Promise.allSettled(Array.from(imgs).map(img=>new Promise(res=>{if(img.complete)res();else{img.onload=res;img.onerror=res;}})));
       await html2pdf().set({
-        margin:[10,10],
+        margin:[8,8],
         filename:'StockSense_庫存_'+new Date().toISOString().slice(0,10)+'.pdf',
         image:{type:'jpeg',quality:0.95},
         html2canvas:{scale:2,useCORS:true,allowTaint:true,logging:false,windowWidth:1040},
@@ -518,28 +464,16 @@ function ImportPage(){
         const b=window.brandFromFilename(f.name);
         const p=window.periodFromFilename(f.name);
         const clean=r.filter(x=>x.style_no&&parseInt(x.qty)>0).map(x=>({...x,qty:parseInt(x.qty),brand:b}));
-        const totalQty=clean.reduce((s,x)=>s+x.qty,0);
-        const qtyA=clean.filter(x=>x.grade==='A').reduce((s,x)=>s+x.qty,0);
-        const qtyB=clean.filter(x=>x.grade==='B').reduce((s,x)=>s+x.qty,0);
-        const {data,error}=await sb.rpc('rpc_import_commit',{p_filename:f.name,p_brand:b,p_period:p,p_release_date:null,p_records:clean,p_expected_total:totalQty});
+        const {data,error}=await sb.rpc('rpc_import_commit',{p_filename:f.name,p_brand:b,p_period:p,p_release_date:null,p_records:clean,p_expected_total:clean.reduce((s,x)=>s+x.qty,0)});
         if(error)throw error;
         // 背景抽圖
-        updated[i]={...updated[i],status:'extracting',result:data,totalQty,qtyA,qtyB,imgStatus:'抽圖中…'};
-        setQueue([...updated]);
         (async()=>{try{
           const session=await sb.auth.getSession();const token=session?.data?.session?.access_token;
-          if(!token){updated[i].imgStatus='無法抽圖';setQueue([...updated]);return;}
-          const fd=new FormData();fd.append('file',f);
+          if(!token)return;const fd=new FormData();fd.append('file',f);
           const res=await fetch(`${window.CONFIG.BACKEND_URL}/extract`,{method:'POST',headers:{Authorization:`Bearer ${token}`},body:fd});
-          if(res.ok){const d=await res.json();
-            if(d.ok&&d.results){
-              for(const rx of d.results){if(rx.image_url)await sb.from('products').update({image_url:rx.image_url}).eq('style_no',rx.style_no).is('image_url',null);}
-              updated[i].imgStatus=`已抽圖 ${d.uploaded}/${d.extracted} 張`;
-            }
-          }else{updated[i].imgStatus='抽圖失敗';}
-        }catch(e){updated[i].imgStatus='抽圖失敗';}
-        updated[i].status='done';setQueue([...updated]);})();
-        updated[i]={...updated[i],status:'done'};
+          if(res.ok){const d=await res.json();if(d.ok&&d.results){for(const rx of d.results){if(rx.image_url)await sb.from('products').update({image_url:rx.image_url}).eq('style_no',rx.style_no).is('image_url',null);}}}
+        }catch(e){}})();
+        updated[i]={...updated[i],status:'done',result:data};
       }catch(ex){updated[i]={...updated[i],status:'error',error:ex.message};}
       setQueue([...updated]);
     }
@@ -591,13 +525,10 @@ function ImportPage(){
       </div>
       <div className="space-y-2 mb-4 max-h-64 overflow-auto">
         {queue.map((q,i)=><div key={i} className="flex items-center gap-3 text-sm px-3 py-2 bg-slate-50 rounded-lg">
-          <span className={`text-xs px-2 py-0.5 rounded font-semibold shrink-0 ${q.status==='done'?'bg-emerald-100 text-emerald-700':q.status==='error'?'bg-rose-100 text-rose-600':q.status==='extracting'||q.status==='processing'?'bg-indigo-100 text-indigo-700':'bg-slate-200 text-slate-500'}`}>{q.status==='done'?'完成':q.status==='error'?'失敗':q.status==='extracting'||q.status==='processing'?'處理中':'待處理'}</span>
+          <span className={`text-xs px-2 py-0.5 rounded font-semibold ${q.status==='done'?'bg-emerald-100 text-emerald-700':q.status==='error'?'bg-rose-100 text-rose-600':q.status==='processing'?'bg-indigo-100 text-indigo-700':'bg-slate-200 text-slate-500'}`}>{q.status==='done'?'完成':q.status==='error'?'失敗':q.status==='processing'?'處理中':'待處理'}</span>
           <span className="flex-1 truncate font-mono text-xs">{q.file.name}</span>
-          {q.totalQty!=null&&<span className="text-xs text-slate-600 shrink-0">共{fmt(q.totalQty)}件</span>}
-          {q.qtyA>0&&<span className="text-xs text-emerald-600 shrink-0">A品{fmt(q.qtyA)}</span>}
-          {q.qtyB>0&&<span className="text-xs text-amber-600 shrink-0">B品{fmt(q.qtyB)}</span>}
-          {q.imgStatus&&<span className={`text-xs shrink-0 ${q.imgStatus.startsWith('已抽')? 'text-violet-600':'text-slate-400'}`}>{q.imgStatus}</span>}
-          {q.error&&<span className="text-xs text-rose-500 truncate max-w-[160px]">{q.error}</span>}
+          {q.result&&<span className="text-xs text-emerald-600">{fmt(q.result.excel_total)}件</span>}
+          {q.error&&<span className="text-xs text-rose-500 truncate max-w-[200px]">{q.error}</span>}
         </div>)}
       </div>
       <div className="flex gap-3">
@@ -830,13 +761,9 @@ function History(){
   const doBatchDel=async()=>{
     setBusy(true);setBatchDelConfirm(false);
     const ids=[...selected];
-    // 並發刪除,不用逐筆等
-    const results=await Promise.allSettled(
-      ids.map(id=>sb.rpc('rpc_movement_delete',{p_movement_id:id}))
-    );
-    const ok=results.filter(r=>r.status==='fulfilled'&&!r.value.error).length;
-    const fail=results.length-ok;
-    showMsg(`批量刪除完成: 成功${ok} 失敗${fail}`,fail===0);
+    const results=await Promise.allSettled(ids.map(id=>sb.rpc('rpc_movement_delete',{p_movement_id:id})));
+    const ok=results.filter(r=>r.status==='fulfilled'&&!r.value?.error).length;
+    showMsg(`批量刪除完成: 成功${ok} 失敗${results.length-ok}`,results.length===ok);
     setBusy(false);load();
   };
   const toggleSel=(id)=>{const s=new Set(selected);s.has(id)?s.delete(id):s.add(id);setSelected(s);};
