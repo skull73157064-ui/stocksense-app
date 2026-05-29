@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>StockSense · 成衣倉儲管理</title>
+<!-- build 0529-1430 --><title>StockSense · 成衣倉儲管理</title>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js" crossorigin></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js" crossorigin></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.23.2/babel.min.js"></script>
@@ -292,8 +292,10 @@ function Overview(){
 // ===== 庫存查詢(品牌/等級/檔名篩選 + 解禁顏色)=====
 function Inventory(){
   const [rows,setRows]=useState(null),[err,setErr]=useState(""),[grade,setGrade]=useState(''),[brand,setBrand]=useState(''),[print,setPrint]=useState(''),[q,setQ]=useState(''),[fileq,setFileq]=useState('');
+  const [brandMgmt,setBrandMgmt]=useState(false),[editingBrand,setEditingBrand]=useState(null),[newBrandName,setNewBrandName]=useState("");
   const [brands,setBrands]=useState([]),[zoom,setZoom]=useState(null),[exporting,setExporting]=useState(false);
   useEffect(()=>{sb.from('v_stock_by_brand').select('brand').then(({data})=>setBrands((data||[]).map(b=>b.brand).filter(Boolean)));},[]);
+  const renameBrand=async(on,nn)=>{if(!nn.trim()||nn===on)return;try{await sb.from('brands').update({name:nn}).eq('name',on);await sb.from('import_batches').update({brand:nn}).eq('brand',on);setEditingBrand(null);setNewBrandName("");sb.from('v_stock_by_brand').select('brand').then(({data})=>setBrands((data||[]).map(b=>b.brand).filter(Boolean)));setRows(null);}catch(e){alert('更新失敗:'+e.message);}};
   useEffect(()=>{const t=setTimeout(async()=>{setRows(null);
     try{
       const {data,error}=await sb.from('v_inventory').select('*').gt('total_qty',0).order('total_qty',{ascending:false}).limit(800);
@@ -327,42 +329,125 @@ function Inventory(){
   };
   const exportPDF=async(data)=>{
     if(!data||!data.length){alert('沒有資料可導出');return;}
+    if(!window.html2pdf){alert('PDF 函式庫尚未載入,請重新整理頁面');return;}
     setExporting(true);
+    // 進度提示
+    const overlay=document.createElement('div');
+    overlay.id='__pdf_overlay__';
+    overlay.style.cssText='position:fixed;inset:0;background:rgba(15,23,42,0.7);z-index:99999;display:flex;align-items:center;justify-content:center;';
+    overlay.innerHTML='<div style="background:#fff;padding:24px 32px;border-radius:14px;box-shadow:0 10px 40px rgba(0,0,0,0.3);font-family:sans-serif;min-width:280px;text-align:center"><div style="font-size:15px;font-weight:600;color:#1e293b;margin-bottom:8px">產生 PDF 中</div><div id="__pdf_prog__" style="font-size:13px;color:#64748b">準備中…</div></div>';
+    document.body.appendChild(overlay);
+    const setProg=(t)=>{const el=document.getElementById('__pdf_prog__');if(el)el.textContent=t;};
+    let container=null;
     try{
-      const container=document.createElement('div');
-      container.style.cssText='position:absolute;top:0;left:0;width:1000px;background:white;padding:20px;font-family:sans-serif;visibility:hidden;z-index:-9999;';
-      document.body.style.position='relative';
-      container.innerHTML=`<div style="font-size:18px;font-weight:bold;margin-bottom:8px">StockSense 庫存報表</div><div style="font-size:12px;color:#666;margin-bottom:16px">導出時間: ${new Date().toLocaleString('zh-TW')} / 共 ${data.length} 筆</div>`;
-      const tbl=document.createElement('table');
-      tbl.style.cssText='width:100%;border-collapse:collapse;font-size:11px;';
-      tbl.innerHTML=`<thead><tr style="background:#f1f5f9">${['圖片','品牌','款號','色號','顏色','等級','印花','尺碼','件數'].map(h=>`<th style="padding:6px 8px;text-align:left;font-weight:600">${h}</th>`).join('')}</tr></thead><tbody>${data.map(d=>`<tr style="border-bottom:1px solid #e2e8f0"><td style="padding:4px 8px">${d.image_url?`<img src="${d.image_url}" crossorigin="anonymous" style="width:55px;height:55px;object-fit:cover;border-radius:4px" onerror="this.style.display='none'">`:'<div style="width:55px;height:55px;background:#f1f5f9;border-radius:4px;display:flex;align-items:center;justify-content:center;font-size:9px;color:#94a3b8">無圖</div>'}</td><td style="padding:4px 8px">${d.brand||''}</td><td style="padding:4px 8px;font-family:monospace">${d.style_no||''}${d.part?'/'+d.part:''}</td><td style="padding:4px 8px">${d.color_code||''}</td><td style="padding:4px 8px">${d.color_desc||''}</td><td style="padding:4px 8px">${d.grade||''}</td><td style="padding:4px 8px">${d.print_mark||''}</td><td style="padding:4px 8px">${d.size_label||''}</td><td style="padding:4px 8px;font-weight:bold">${d.total_qty||0}</td></tr>`).join('')}</tbody>`;
-      container.appendChild(tbl);
+      // === 第一步:把所有圖片預先抓回來轉成 base64 (徹底解決 CORS 問題) ===
+      const urls=[...new Set(data.filter(d=>d.image_url).map(d=>d.image_url))];
+      setProg('載入 0/'+urls.length+' 張圖片…');
+      const cache={};
+      let done=0;
+      await Promise.all(urls.map(async url=>{
+        try{
+          const r=await fetch(url);
+          if(!r.ok)throw new Error('http '+r.status);
+          const blob=await r.blob();
+          const dataUrl=await new Promise((res,rej)=>{
+            const fr=new FileReader();
+            fr.onload=()=>res(fr.result);
+            fr.onerror=()=>rej(new Error('FileReader fail'));
+            fr.readAsDataURL(blob);
+          });
+          cache[url]=dataUrl;
+        }catch(e){
+          console.warn('圖片載入失敗:',url,e);
+          cache[url]=null;
+        }
+        done++;
+        setProg('載入 '+done+'/'+urls.length+' 張圖片…');
+      }));
+      // === 第二步:在頁面建立 PDF 容器(可見,opacity 1,放在最上層後面層,使用者看到 overlay 蓋住) ===
+      setProg('排版中…');
+      container=document.createElement('div');
+      container.id='__pdf_container__';
+      container.style.cssText='position:fixed;left:0;top:0;width:1240px;background:#ffffff;padding:24px;font-family:"Microsoft JhengHei","Noto Sans TC","PingFang TC","Heiti TC",sans-serif;color:#0f172a;z-index:1;line-height:1.5;';
+      const esc=(s)=>String(s==null?'':s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+      const totA=data.filter(d=>d.grade==='A').reduce((s,d)=>s+(d.total_qty||0),0);
+      const totB=data.filter(d=>d.grade==='B').reduce((s,d)=>s+(d.total_qty||0),0);
+      const tot=data.reduce((s,d)=>s+(d.total_qty||0),0);
+      let h='';
+      h+='<div style="font-size:22px;font-weight:bold;margin-bottom:6px;color:#0f172a">StockSense 庫存報表</div>';
+      h+='<div style="font-size:12px;color:#64748b;margin-bottom:14px">';
+      h+='導出時間: '+new Date().toLocaleString('zh-TW')+' &nbsp;|&nbsp; 共 '+data.length+' 筆 &nbsp;|&nbsp; ';
+      h+='<span style="color:#059669;font-weight:600">A 品 '+totA+'</span> / ';
+      h+='<span style="color:#d97706;font-weight:600">B 品 '+totB+'</span> / ';
+      h+='<span style="font-weight:700">總 '+tot+' 件</span>';
+      h+='</div>';
+      h+='<table style="width:100%;border-collapse:collapse;font-size:11px">';
+      h+='<thead><tr style="background:#f1f5f9">';
+      ['圖片','品牌','款號','色號','顏色','等級','印花','尺碼','件數'].forEach(t=>{
+        h+='<th style="padding:8px;text-align:left;font-weight:700;border:1px solid #cbd5e1;color:#0f172a">'+t+'</th>';
+      });
+      h+='</tr></thead><tbody>';
+      data.forEach(d=>{
+        h+='<tr>';
+        const img=d.image_url?cache[d.image_url]:null;
+        if(img){
+          h+='<td style="padding:4px;border:1px solid #cbd5e1;width:60px"><img src="'+img+'" style="width:50px;height:50px;object-fit:cover;border-radius:4px;display:block"/></td>';
+        }else{
+          h+='<td style="padding:4px;border:1px solid #cbd5e1;width:60px;text-align:center;color:#94a3b8;font-size:9px">無圖</td>';
+        }
+        h+='<td style="padding:6px 8px;border:1px solid #cbd5e1">'+esc(d.brand)+'</td>';
+        h+='<td style="padding:6px 8px;border:1px solid #cbd5e1;font-family:monospace">'+esc(d.style_no)+(d.part?'/'+esc(d.part):'')+'</td>';
+        h+='<td style="padding:6px 8px;border:1px solid #cbd5e1">'+esc(d.color_code)+'</td>';
+        h+='<td style="padding:6px 8px;border:1px solid #cbd5e1">'+esc(d.color_desc)+'</td>';
+        h+='<td style="padding:6px 8px;border:1px solid #cbd5e1;text-align:center">'+esc(d.grade)+'</td>';
+        h+='<td style="padding:6px 8px;border:1px solid #cbd5e1">'+esc(d.print_mark)+'</td>';
+        h+='<td style="padding:6px 8px;border:1px solid #cbd5e1">'+esc(d.size_label)+'</td>';
+        h+='<td style="padding:6px 8px;border:1px solid #cbd5e1;font-weight:700;text-align:right">'+(d.total_qty||0)+'</td>';
+        h+='</tr>';
+      });
+      h+='</tbody></table>';
+      container.innerHTML=h;
       document.body.appendChild(container);
-      const imgs=container.querySelectorAll('img');
-      await Promise.allSettled(Array.from(imgs).map(img=>new Promise(res=>{if(img.complete)res();else{img.onload=res;img.onerror=res;}})));
-      await html2pdf().set({
-        margin:[8,8],
+      // 給瀏覽器一點時間完成佈局
+      await new Promise(r=>setTimeout(r,500));
+      // === 第三步:html2pdf 截圖 ===
+      setProg('產生 PDF 中…');
+      await window.html2pdf().set({
+        margin:8,
         filename:'StockSense_庫存_'+new Date().toISOString().slice(0,10)+'.pdf',
-        image:{type:'jpeg',quality:0.95},
-        html2canvas:{scale:2,useCORS:true,allowTaint:true,logging:false,windowWidth:1040},
-        jsPDF:{unit:'mm',format:'a3',orientation:'landscape'}
+        image:{type:'jpeg',quality:0.92},
+        html2canvas:{scale:1.5,useCORS:false,allowTaint:false,backgroundColor:'#ffffff',logging:false,width:1240,windowWidth:1240,scrollY:0},
+        jsPDF:{unit:'mm',format:'a3',orientation:'landscape',compress:true},
+        pagebreak:{mode:['css','legacy']}
       }).from(container).save();
-      document.body.removeChild(container);
-    }catch(e){alert('PDF導出失敗:'+e.message);}
+    }catch(e){
+      console.error('PDF 錯誤:',e);
+      alert('PDF 導出失敗: '+(e.message||e));
+    }
+    // 清理
+    if(container&&container.parentNode)container.parentNode.removeChild(container);
+    if(overlay.parentNode)overlay.parentNode.removeChild(overlay);
     setExporting(false);
-  };
-
-  return <div className="p-4 md:p-8"><Card className="overflow-hidden">
+  };return <div className="p-4 md:p-8"><Card className="overflow-hidden">
     <div className="p-4 md:p-6 border-b border-slate-100 flex flex-wrap gap-3 items-center">
-      <select className={sel} value={brand} onChange={e=>setBrand(e.target.value)}><option value="">全部品牌</option>{brands.map(b=><option key={b} value={b}>{b}</option>)}</select>
+      <div className="flex items-center gap-1">
+        <select className={sel} value={brand} onChange={e=>setBrand(e.target.value)}><option value="">全部品牌</option>{brands.map(b=><option key={b} value={b}>{b}</option>)}</select>
+        <button onClick={()=>setBrandMgmt(!brandMgmt)} title="管理品牌名稱" className="p-2 rounded-lg bg-slate-50 hover:bg-indigo-50 text-slate-500 hover:text-indigo-600">✏</button>
+      </div>
       <select className={sel} value={grade} onChange={e=>setGrade(e.target.value)}><option value="">A/B 品</option><option value="A">A 品</option><option value="B">B 品</option></select>
       <select className={sel} value={print} onChange={e=>setPrint(e.target.value)}><option value="">印花不限</option><option value="Y">有印花</option><option value="N">無印花</option></select>
       <input className={sel+" flex-1 min-w-[130px]"} placeholder="搜尋款號/顏色…" value={q} onChange={e=>setQ(e.target.value)}/>
       <input className={sel+" flex-1 min-w-[130px]"} placeholder="依檔名篩選…" value={fileq} onChange={e=>setFileq(e.target.value)}/>
-      {rows&&<><Pill tone="indigo">{fmt(rows.length)} 列</Pill><Pill tone="slate">{fmt(rows.reduce((s,r)=>s+(r.total_qty||0),0))} 件</Pill></>}
+      {rows&&<>
+        <Pill tone="indigo">{fmt(rows.length)} 列</Pill>
+        <Pill tone="A">A品 {fmt(rows.filter(r=>r.grade==='A').reduce((s,r)=>s+(r.total_qty||0),0))}</Pill>
+        <Pill tone="B">B品 {fmt(rows.filter(r=>r.grade==='B').reduce((s,r)=>s+(r.total_qty||0),0))}</Pill>
+        <Pill tone="slate">總 {fmt(rows.reduce((s,r)=>s+(r.total_qty||0),0))} 件</Pill>
+      </>}
       <button onClick={()=>exportExcel(rows)} disabled={exporting||!rows||!rows.length} className="px-3 py-2 rounded-xl bg-emerald-600 text-white text-sm font-semibold disabled:opacity-40">⬇ Excel</button>
       <button onClick={()=>exportPDF(rows)} disabled={exporting||!rows||!rows.length} className="px-3 py-2 rounded-xl bg-rose-600 text-white text-sm font-semibold disabled:opacity-40">⬇ PDF</button>
     </div>
+    {brandMgmt&&<div className="px-4 md:px-6 py-3 border-b border-slate-100 bg-slate-50/50"><div className="text-xs font-semibold text-slate-400 mb-2">點擊品牌名稱可重新命名</div><div className="flex flex-wrap gap-2">{brands.map(b=><div key={b} className="flex items-center gap-1.5">{editingBrand===b?<><input autoFocus value={newBrandName} onChange={e=>setNewBrandName(e.target.value)} onKeyDown={e=>e.key==='Enter'&&renameBrand(b,newBrandName)} className="text-xs border border-indigo-300 rounded-lg px-2 py-1 w-28 outline-none"/><button onClick={()=>renameBrand(b,newBrandName)} className="text-xs text-indigo-600 font-semibold">確認</button><button onClick={()=>setEditingBrand(null)} className="text-xs text-slate-400">取消</button></>:<button onClick={()=>{setEditingBrand(b);setNewBrandName(b);}} className="text-xs bg-white hover:bg-indigo-50 text-slate-700 px-3 py-1.5 rounded-lg font-semibold border border-slate-200">✏ {b}</button>}</div>)}</div></div>}
     {err?<ErrBox msg={err}/>:!rows?<Loading/>:rows.length===0?<Empty msg="無符合資料"/>:
     <div className="overflow-auto" style={{maxHeight:540}}><table className="w-full">
       <thead className="bg-slate-50/80 sticky top-0"><tr>{['圖片','品牌','款號','色號','顏色','產品線','等級','印花','尺碼','解禁日','來源檔','件數'].map((h,i)=><th key={h} className={`px-3 py-3 text-xs font-semibold text-slate-400 uppercase ${i===11?'text-right':'text-left'}`}>{h}</th>)}</tr></thead>
@@ -464,16 +549,27 @@ function ImportPage(){
         const b=window.brandFromFilename(f.name);
         const p=window.periodFromFilename(f.name);
         const clean=r.filter(x=>x.style_no&&parseInt(x.qty)>0).map(x=>({...x,qty:parseInt(x.qty),brand:b}));
-        const {data,error}=await sb.rpc('rpc_import_commit',{p_filename:f.name,p_brand:b,p_period:p,p_release_date:null,p_records:clean,p_expected_total:clean.reduce((s,x)=>s+x.qty,0)});
+        const totalQty=clean.reduce((s,x)=>s+x.qty,0);
+        const qtyA=clean.filter(x=>x.grade==='A').reduce((s,x)=>s+x.qty,0);
+        const qtyB=clean.filter(x=>x.grade==='B').reduce((s,x)=>s+x.qty,0);
+        const {data,error}=await sb.rpc('rpc_import_commit',{p_filename:f.name,p_brand:b,p_period:p,p_release_date:null,p_records:clean,p_expected_total:totalQty});
         if(error)throw error;
-        // 背景抽圖
-        (async()=>{try{
+        updated[i]={...updated[i],status:'done',result:data,totalQty,qtyA,qtyB,imgStatus:'抽圖中…'};
+        setQueue([...updated]);
+        // 背景抽圖,完成後更新 imgStatus
+        ((idx)=>{(async()=>{try{
           const session=await sb.auth.getSession();const token=session?.data?.session?.access_token;
-          if(!token)return;const fd=new FormData();fd.append('file',f);
+          if(!token){updated[idx].imgStatus='無法抽圖';setQueue([...updated]);return;}
+          const fd=new FormData();fd.append('file',f);
           const res=await fetch(`${window.CONFIG.BACKEND_URL}/extract`,{method:'POST',headers:{Authorization:`Bearer ${token}`},body:fd});
-          if(res.ok){const d=await res.json();if(d.ok&&d.results){for(const rx of d.results){if(rx.image_url)await sb.from('products').update({image_url:rx.image_url}).eq('style_no',rx.style_no).is('image_url',null);}}}
-        }catch(e){}})();
-        updated[i]={...updated[i],status:'done',result:data};
+          if(res.ok){const d=await res.json();
+            if(d.ok&&d.results){
+              for(const rx of d.results){if(rx.image_url)await sb.from('products').update({image_url:rx.image_url}).eq('style_no',rx.style_no).is('image_url',null);}
+              updated[idx].imgStatus=`已抽圖 ${d.uploaded}/${d.extracted} 張`;
+            }else{updated[idx].imgStatus='抽圖回應異常';}
+          }else{updated[idx].imgStatus='抽圖失敗';}
+        }catch(e){updated[idx].imgStatus='抽圖失敗';}
+        setQueue([...updated]);})();})(i);
       }catch(ex){updated[i]={...updated[i],status:'error',error:ex.message};}
       setQueue([...updated]);
     }
@@ -525,10 +621,13 @@ function ImportPage(){
       </div>
       <div className="space-y-2 mb-4 max-h-64 overflow-auto">
         {queue.map((q,i)=><div key={i} className="flex items-center gap-3 text-sm px-3 py-2 bg-slate-50 rounded-lg">
-          <span className={`text-xs px-2 py-0.5 rounded font-semibold ${q.status==='done'?'bg-emerald-100 text-emerald-700':q.status==='error'?'bg-rose-100 text-rose-600':q.status==='processing'?'bg-indigo-100 text-indigo-700':'bg-slate-200 text-slate-500'}`}>{q.status==='done'?'完成':q.status==='error'?'失敗':q.status==='processing'?'處理中':'待處理'}</span>
+          <span className={`text-xs px-2 py-0.5 rounded font-semibold shrink-0 ${q.status==='done'?'bg-emerald-100 text-emerald-700':q.status==='error'?'bg-rose-100 text-rose-600':q.status==='processing'?'bg-indigo-100 text-indigo-700':'bg-slate-200 text-slate-500'}`}>{q.status==='done'?'完成':q.status==='error'?'失敗':q.status==='processing'?'處理中':'待處理'}</span>
           <span className="flex-1 truncate font-mono text-xs">{q.file.name}</span>
-          {q.result&&<span className="text-xs text-emerald-600">{fmt(q.result.excel_total)}件</span>}
-          {q.error&&<span className="text-xs text-rose-500 truncate max-w-[200px]">{q.error}</span>}
+          {q.totalQty!=null&&<span className="text-xs text-slate-600 shrink-0">總 {fmt(q.totalQty)}件</span>}
+          {q.qtyA>0&&<span className="text-xs text-emerald-600 shrink-0 font-semibold">A品 {fmt(q.qtyA)}</span>}
+          {q.qtyB>0&&<span className="text-xs text-amber-600 shrink-0 font-semibold">B品 {fmt(q.qtyB)}</span>}
+          {q.imgStatus&&<span className={`text-xs shrink-0 font-semibold ${q.imgStatus.startsWith('已抽')?'text-violet-600':q.imgStatus==='抽圖中…'?'text-indigo-500':'text-slate-400'}`}>{q.imgStatus}</span>}
+          {q.error&&<span className="text-xs text-rose-500 truncate max-w-[160px]">{q.error}</span>}
         </div>)}
       </div>
       <div className="flex gap-3">
@@ -611,25 +710,29 @@ function ImportPage(){
 
 // ===== 入庫/出庫(表單式,防誤觸)=====
 function Move(){
-  const [rows,setRows]=useState(null),[err,setErr]=useState(""),[q,setQ]=useState(''),[brand,setBrand]=useState(''),[print,setPrint]=useState(''),[msg,setMsg]=useState(null);
+  const [rows,setRows]=useState(null),[err,setErr]=useState(""),[q,setQ]=useState(''),[brand,setBrand]=useState(''),[print,setPrint]=useState(''),[fileq,setFileq]=useState(''),[grade,setGrade]=useState(''),[msg,setMsg]=useState(null);
   const [brands,setBrands]=useState([]),[batches,setBatches]=useState([]);
   const [modal,setModal]=useState(null),[qty,setQty]=useState(""),[note,setNote]=useState(""),[busy,setBusy]=useState(false);
   const [batchModal,setBatchModal]=useState(null); // 整批出庫
+  const [brandMgmt,setBrandMgmt]=useState(false),[editingBrand,setEditingBrand]=useState(null),[newBrandName,setNewBrandName]=useState("");
+  const renameBrand=async(on,nn)=>{if(!nn.trim()||nn===on)return;try{await sb.from('brands').update({name:nn}).eq('name',on);await sb.from('import_batches').update({brand:nn}).eq('brand',on);setEditingBrand(null);setNewBrandName("");sb.from('v_stock_by_brand').select('brand').then(({data})=>setBrands((data||[]).map(b=>b.brand).filter(Boolean)));sb.from('v_batches').select('*').then(({data})=>setBatches(data||[]));load();}catch(e){alert('更新失敗:'+e.message);}};
   useEffect(()=>{
     sb.from('v_stock_by_brand').select('brand').then(({data})=>setBrands((data||[]).map(b=>b.brand).filter(Boolean)));
     sb.from('v_batches').select('*').then(({data})=>setBatches(data||[]));
   },[]);
   const load=async()=>{try{
-    const {data,error}=await sb.from('v_inventory').select('product_size_id,size_label,total_qty,style_no,part,color_desc,grade,brand,print_mark,release_date,last_period,image_url').order('total_qty',{ascending:false}).limit(200);
+    const {data,error}=await sb.from('v_inventory').select('product_size_id,size_label,total_qty,style_no,part,color_desc,grade,brand,print_mark,release_date,last_period,image_url,last_filename').order('total_qty',{ascending:false}).limit(500);
     if(error)throw error;
     let list=(data||[]);
     if(brand)list=list.filter(r=>r.brand===brand);
+    if(grade)list=list.filter(r=>r.grade===grade);
     if(print==='Y')list=list.filter(r=>/有/.test(r.print_mark||''));
     else if(print==='N')list=list.filter(r=>/無/.test(r.print_mark||''));
     if(q){const k=q.toLowerCase();list=list.filter(r=>(r.style_no||'').toLowerCase().includes(k)||(r.color_desc||'').toLowerCase().includes(k));}
+    if(fileq){const k=fileq.toLowerCase();list=list.filter(r=>(r.last_filename||'').toLowerCase().includes(k));}
     setRows(list);
   }catch(e){setErr(e.message);}};
-  useEffect(()=>{const t=setTimeout(load,300);return()=>clearTimeout(t);},[q,brand,print]);
+  useEffect(()=>{const t=setTimeout(load,300);return()=>clearTimeout(t);},[q,brand,print,fileq,grade]);
   const showMsg=(m,ok)=>{setMsg({m,ok});setTimeout(()=>setMsg(null),3500);};
   const openModal=(row,action)=>{setModal({row,action});setQty("");setNote("");setErr("");};
   const submit=async()=>{
@@ -668,11 +771,22 @@ function Move(){
     </Card>
     <Card className="overflow-hidden">
     <div className="p-4 md:p-6 border-b border-slate-100 flex flex-wrap gap-3 items-center">
-      <select className={sel} value={brand} onChange={e=>setBrand(e.target.value)}><option value="">全部品牌</option>{brands.map(b=><option key={b} value={b}>{b}</option>)}</select>
+      <div className="flex items-center gap-1">
+        <select className={sel} value={brand} onChange={e=>setBrand(e.target.value)}><option value="">全部品牌</option>{brands.map(b=><option key={b} value={b}>{b}</option>)}</select>
+        <button onClick={()=>setBrandMgmt(!brandMgmt)} title="管理品牌名稱" className="p-2 rounded-lg bg-slate-50 hover:bg-indigo-50 text-slate-500 hover:text-indigo-600">✏</button>
+      </div>
+      <select className={sel} value={grade} onChange={e=>setGrade(e.target.value)}><option value="">A/B 品</option><option value="A">A 品</option><option value="B">B 品</option></select>
       <select className={sel} value={print} onChange={e=>setPrint(e.target.value)}><option value="">印花不限</option><option value="Y">有印花</option><option value="N">無印花</option></select>
-      <input className={sel+" flex-1 min-w-[180px]"} placeholder="搜尋款號/顏色…" value={q} onChange={e=>setQ(e.target.value)}/>
-      <span className="text-xs text-slate-400">單筆挑出:點按鈕跳表單</span>
+      <input className={sel+" flex-1 min-w-[140px]"} placeholder="搜尋款號/顏色…" value={q} onChange={e=>setQ(e.target.value)}/>
+      <input className={sel+" flex-1 min-w-[140px]"} placeholder="依來源檔篩選…" value={fileq} onChange={e=>setFileq(e.target.value)}/>
+      {rows&&<>
+        <Pill tone="indigo">{fmt(rows.length)} 列</Pill>
+        <Pill tone="A">A品 {fmt(rows.filter(r=>r.grade==='A').reduce((s,r)=>s+(r.total_qty||0),0))}</Pill>
+        <Pill tone="B">B品 {fmt(rows.filter(r=>r.grade==='B').reduce((s,r)=>s+(r.total_qty||0),0))}</Pill>
+        <Pill tone="slate">總 {fmt(rows.reduce((s,r)=>s+(r.total_qty||0),0))} 件</Pill>
+      </>}
     </div>
+    {brandMgmt&&<div className="px-4 md:px-6 py-3 border-b border-slate-100 bg-slate-50/50"><div className="text-xs font-semibold text-slate-400 mb-2">點擊品牌名稱可重新命名</div><div className="flex flex-wrap gap-2">{brands.map(b=><div key={b} className="flex items-center gap-1.5">{editingBrand===b?<><input autoFocus value={newBrandName} onChange={e=>setNewBrandName(e.target.value)} onKeyDown={e=>e.key==='Enter'&&renameBrand(b,newBrandName)} className="text-xs border border-indigo-300 rounded-lg px-2 py-1 w-28 outline-none"/><button onClick={()=>renameBrand(b,newBrandName)} className="text-xs text-indigo-600 font-semibold">確認</button><button onClick={()=>setEditingBrand(null)} className="text-xs text-slate-400">取消</button></>:<button onClick={()=>{setEditingBrand(b);setNewBrandName(b);}} className="text-xs bg-white hover:bg-indigo-50 text-slate-700 px-3 py-1.5 rounded-lg font-semibold border border-slate-200">✏ {b}</button>}</div>)}</div></div>}
     {err&&!modal&&!batchModal?<ErrBox msg={err}/>:!rows?<Loading/>:
     <div className="overflow-auto" style={{maxHeight:480}}><table className="w-full">
       <thead className="bg-slate-50/80 sticky top-0"><tr>{['圖','品牌','月份','款號','顏色','尺碼','等級','印花','解禁','現有','操作'].map((h,i)=><th key={h} className={`px-3 py-3 text-xs font-semibold text-slate-400 ${i>=9?'text-right':'text-left'}`}>{h}</th>)}</tr></thead>
@@ -732,6 +846,7 @@ function History(){
   const [selected,setSelected]=useState(new Set()); // 多選
   const [batchDelConfirm,setBatchDelConfirm]=useState(false);
   useEffect(()=>{sb.from('v_stock_by_brand').select('brand').then(({data})=>setBrands((data||[]).map(b=>b.brand).filter(Boolean)));},[]);
+  const renameBrand=async(on,nn)=>{if(!nn.trim()||nn===on)return;try{await sb.from('brands').update({name:nn}).eq('name',on);await sb.from('import_batches').update({brand:nn}).eq('brand',on);setEditingBrand(null);setNewBrandName("");sb.from('v_stock_by_brand').select('brand').then(({data})=>setBrands((data||[]).map(b=>b.brand).filter(Boolean)));setRows(null);}catch(e){alert('更新失敗:'+e.message);}};
   const load=async()=>{setSelected(new Set());try{
     const {data,error}=await sb.from('v_movement_history').select('*').limit(500);
     if(error)throw error;
@@ -850,6 +965,7 @@ function Photos(){
   const [rows,setRows]=useState(null),[err,setErr]=useState(""),[q,setQ]=useState(''),[brand,setBrand]=useState(''),[onlyNo,setOnlyNo]=useState(false);
   const [brands,setBrands]=useState([]),[msg,setMsg]=useState(null),[upId,setUpId]=useState(null);
   useEffect(()=>{sb.from('v_stock_by_brand').select('brand').then(({data})=>setBrands((data||[]).map(b=>b.brand).filter(Boolean)));},[]);
+  const renameBrand=async(on,nn)=>{if(!nn.trim()||nn===on)return;try{await sb.from('brands').update({name:nn}).eq('name',on);await sb.from('import_batches').update({brand:nn}).eq('brand',on);setEditingBrand(null);setNewBrandName("");sb.from('v_stock_by_brand').select('brand').then(({data})=>setBrands((data||[]).map(b=>b.brand).filter(Boolean)));setRows(null);}catch(e){alert('更新失敗:'+e.message);}};
   const load=async()=>{try{
     // 以款式為單位(去重),取每款一筆
     const {data,error}=await sb.from('products').select('id,style_no,part,color_code,color_desc,grade,print_mark,image_url,brand_lines(canonical,brands(name))').limit(1000);
