@@ -620,7 +620,7 @@ function Move(){
     sb.from('v_batches').select('*').then(({data})=>setBatches(data||[]));
   },[]);
   const load=async()=>{try{
-    const {data,error}=await sb.from('v_inventory').select('product_size_id,size_label,total_qty,style_no,part,color_desc,grade,brand,print_mark,release_date,last_period').order('total_qty',{ascending:false}).limit(200);
+    const {data,error}=await sb.from('v_inventory').select('product_size_id,size_label,total_qty,style_no,part,color_desc,grade,brand,print_mark,release_date,last_period,image_url').order('total_qty',{ascending:false}).limit(200);
     if(error)throw error;
     let list=(data||[]);
     if(brand)list=list.filter(r=>r.brand===brand);
@@ -675,8 +675,9 @@ function Move(){
     </div>
     {err&&!modal&&!batchModal?<ErrBox msg={err}/>:!rows?<Loading/>:
     <div className="overflow-auto" style={{maxHeight:480}}><table className="w-full">
-      <thead className="bg-slate-50/80 sticky top-0"><tr>{['品牌','月份','款號','顏色','尺碼','等級','印花','解禁','現有','操作'].map((h,i)=><th key={h} className={`px-3 py-3 text-xs font-semibold text-slate-400 ${i>=8?'text-right':'text-left'}`}>{h}</th>)}</tr></thead>
+      <thead className="bg-slate-50/80 sticky top-0"><tr>{['圖','品牌','月份','款號','顏色','尺碼','等級','印花','解禁','現有','操作'].map((h,i)=><th key={h} className={`px-3 py-3 text-xs font-semibold text-slate-400 ${i>=9?'text-right':'text-left'}`}>{h}</th>)}</tr></thead>
       <tbody className="divide-y divide-slate-50">{rows.map((d,i)=><tr key={i} className="hover:bg-slate-50">
+        <td className="px-2 py-2 w-14">{d.image_url?<img src={d.image_url} className="w-11 h-11 object-cover rounded-lg" alt="" loading="lazy"/>:<div className="w-11 h-11 rounded-lg bg-slate-100 flex items-center justify-center text-slate-300 text-[10px]">無圖</div>}</td>
         <td className="px-3 py-3 text-sm">{d.brand||'—'}</td>
         <td className="px-3 py-3 font-mono text-xs text-slate-500">{d.last_period||'—'}</td>
         <td className="px-3 py-3 font-mono font-semibold text-sm">{d.style_no}{d.part?'/'+d.part:''}</td>
