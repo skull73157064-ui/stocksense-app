@@ -218,7 +218,7 @@ function Login(){
       <p className="text-xs text-slate-400 text-center mt-4">帳號由管理員建立 · 忘記密碼請洽管理員</p>
     </Card></div>;
 }
-// ===== 總覽(品牌彙總 + 解禁狀態)=====
+// ===== 總覽(品牌彙總)=====
 function Overview(){
   const [d,setD]=useState(null),[err,setErr]=useState("");
   const [fBrand,setFBrand]=useState(''),[fPeriod,setFPeriod]=useState('');
@@ -226,17 +226,27 @@ function Overview(){
   useEffect(()=>{(async()=>{
     try{
       const {data:bb,error:e1}=await sb.from('v_stock_by_brand').select('*');if(e1)throw e1;
-      // 改用查詢 v_inventory 計算 A/B 品 (跟庫存查詢頁面用同一份視圖,確保數字一致)
-      const {data:inv,error:e2}=await sb.from('v_inventory').select('grade,total_qty');if(e2)throw e2;
-      const {data:batches,error:e4}=await sb.from('v_batches').select('*');if(e4)throw e4;
-      // 加總邏輯:用 v_stock_by_brand 的加總,確保跟「各品牌庫存」一致
+      // 用新視圖 v_stock_by_grade 直接拿 A/B 加總(資料庫端 group by)
+      const {data:bg,error:e2}=await sb.from('v_stock_by_grade').select('*');
+      const {data:batches,error:e4}=await sb.from('v_batches').select('*').limit(10000);if(e4)throw e4;
       const total=(bb||[]).reduce((s,r)=>s+(r.total_qty||0),0);
       let A=0,B=0;
-      (inv||[]).forEach(r=>{
-        const q=r.total_qty||0;
-        if(r.grade==='A')A+=q;
-        else if(r.grade==='B')B+=q;
-      });
+      if(!e2&&bg){
+        bg.forEach(r=>{
+          const g=String(r.grade||'').toUpperCase().trim();
+          if(g==='A')A=r.total_qty||0;
+          else if(g==='B')B=r.total_qty||0;
+        });
+      }else{
+        // fallback:若 v_stock_by_grade 視圖還沒建,用 v_inventory 補(可能會被 1000 筆限制)
+        const {data:inv}=await sb.from('v_inventory').select('grade,total_qty').limit(100000);
+        (inv||[]).forEach(r=>{
+          const q=r.total_qty||0;
+          const g=String(r.grade||'').toUpperCase().trim();
+          if(g==='A')A+=q;
+          else if(g==='B')B+=q;
+        });
+      }
       setD({byBrand:(bb||[]).map(r=>({name:r.brand,value:r.total_qty,styles:r.style_count})).sort((a,b)=>b.value-a.value),
         total,A,B,batches:batches||[]});
     }catch(e){setErr(e.message);}
@@ -244,8 +254,8 @@ function Overview(){
   if(err)return <ErrBox msg={err}/>;if(!d)return <Loading/>;
   const today=new Date().toISOString().slice(0,10);
   // 篩選選項
-  const allBrands=[...new Set(d.batches.map(b=>b.brand).filter(Boolean))].sort();
-  const allPeriods=[...new Set(d.batches.map(b=>b.period).filter(Boolean))].sort().reverse();
+  const allBrands=[...new Set(d.batches.filter(b=>(b.total_qty||0)>0).map(b=>b.brand).filter(Boolean))].sort();
+  const allPeriods=[...new Set(d.batches.filter(b=>(b.total_qty||0)>0&&/^\d{4}-\d{2}$/.test(b.period||'')).map(b=>b.period))].sort().reverse();
   // 套用篩選到批次
   let fb=d.batches.filter(b=>(b.total_qty||0)>0); // 只顯示還有庫存的批次
   if(fBrand)fb=fb.filter(b=>b.brand===fBrand);
@@ -289,14 +299,14 @@ function Overview(){
           <td className="px-3 py-2 font-semibold text-slate-700">{b.brand}</td>
           <td className="px-3 py-2 font-mono text-slate-600">{b.period}</td>
           <td className="px-3 py-2 text-xs text-slate-400 max-w-[180px] truncate" title={b.filename||'—'}><span className="block truncate">{b.filename||'—'}</span></td>
-          <td className="px-3 py-2 text-xs">{b.release_date?<span className={b.release_date>today?'text-rose-500':'text-slate-500'}>{b.release_date}</span>:<span className="text-slate-300">—</span>}</td>
+          
           <td className="px-3 py-2 font-mono font-semibold text-right">{fmt(b.total_qty)}</td>
         </tr>)}</tbody></table></div>:<Empty msg="無符合批次"/>}</Card>
   </div>;
 }
 
 
-// ===== 庫存查詢(品牌/等級/檔名篩選 + 解禁顏色)=====
+// ===== 庫存查詢(品牌/等級/檔名篩選)=====
 function Inventory(){
   const [rows,setRows]=useState(null),[err,setErr]=useState(""),[grade,setGrade]=useState(''),[brand,setBrand]=useState(''),[print,setPrint]=useState(''),[q,setQ]=useState(''),[fileq,setFileq]=useState('');
   const [brandMgmt,setBrandMgmt]=useState(false),[editingBrand,setEditingBrand]=useState(null),[newBrandName,setNewBrandName]=useState("");
@@ -325,8 +335,8 @@ function Inventory(){
     setExporting(true);
     try{
       const wb=window.XLSX.utils.book_new();
-      const wsData=[['品牌','款號','色號','顏色','產品線','等級','印花','尺碼','解禁日','來源檔','件數','圖片URL']];
-      data.forEach(d=>wsData.push([d.brand||'',d.style_no+(d.part?'/'+d.part:''),d.color_code||'',d.color_desc||'',d.brand_line||'',d.grade||'',d.print_mark||'',d.size_label||'',d.release_date||'',d.last_filename||'',d.total_qty,d.image_url||'']));
+      const wsData=[['品牌','款號','色號','顏色','產品線','等級','印花','尺碼','來源檔','件數','圖片URL']];
+      data.forEach(d=>wsData.push([d.brand||'',d.style_no+(d.part?'/'+d.part:''),d.color_code||'',d.color_desc||'',d.brand_line||'',d.grade||'',d.print_mark||'',d.size_label||'',d.last_filename||'',d.total_qty,d.image_url||'']));
       const ws=window.XLSX.utils.aoa_to_sheet(wsData);
       ws['!cols']=[{wch:12},{wch:14},{wch:8},{wch:20},{wch:10},{wch:6},{wch:12},{wch:8},{wch:12},{wch:30},{wch:8},{wch:60}];
       window.XLSX.utils.book_append_sheet(wb,ws,'庫存查詢');
@@ -486,7 +496,7 @@ function Inventory(){
     {brandMgmt&&<div className="px-4 md:px-6 py-3 border-b border-slate-100 bg-slate-50/50"><div className="text-xs font-semibold text-slate-400 mb-2">點擊品牌名稱可重新命名</div><div className="flex flex-wrap gap-2">{brands.map(b=><div key={b} className="flex items-center gap-1.5">{editingBrand===b?<><input autoFocus value={newBrandName} onChange={e=>setNewBrandName(e.target.value)} onKeyDown={e=>e.key==='Enter'&&renameBrand(b,newBrandName)} className="text-xs border border-indigo-300 rounded-lg px-2 py-1 w-28 outline-none"/><button onClick={()=>renameBrand(b,newBrandName)} className="text-xs text-indigo-600 font-semibold">確認</button><button onClick={()=>setEditingBrand(null)} className="text-xs text-slate-400">取消</button></>:<button onClick={()=>{setEditingBrand(b);setNewBrandName(b);}} className="text-xs bg-white hover:bg-indigo-50 text-slate-700 px-3 py-1.5 rounded-lg font-semibold border border-slate-200">✏ {b}</button>}</div>)}</div></div>}
     {err?<ErrBox msg={err}/>:!rows?<Loading/>:rows.length===0?<Empty msg="無符合資料"/>:
     <div className="overflow-auto" style={{maxHeight:540}}><table className="w-full">
-      <thead className="bg-slate-50/80 sticky top-0"><tr>{['圖片','品牌','款號','色號','顏色','產品線','等級','印花','尺碼','解禁日','來源檔','件數'].map((h,i)=><th key={h} className={`px-3 py-3 text-xs font-semibold text-slate-400 uppercase ${i===11?'text-right':'text-left'}`}>{h}</th>)}</tr></thead>
+      <thead className="bg-slate-50/80 sticky top-0"><tr>{['圖片','品牌','款號','色號','顏色','產品線','等級','印花','尺碼','來源檔','件數'].map((h,i)=><th key={h} className={`px-3 py-3 text-xs font-semibold text-slate-400 uppercase ${i===10?'text-right':'text-left'}`}>{h}</th>)}</tr></thead>
       <tbody className="divide-y divide-slate-50">{rows.map((d,i)=><tr key={i} className="hover:bg-slate-50">
         <td className="px-3 py-2">{d.image_url?<img src={d.image_url} alt="" className="w-12 h-12 object-cover rounded-lg cursor-pointer" onClick={()=>setZoom(d.image_url)}/>:<div className="w-12 h-12 rounded-lg bg-slate-100 flex items-center justify-center"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#cbd5e1" strokeWidth="2"><rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="8.5" cy="8.5" r="1.5"/><path d="M21 15l-5-5L5 21"/></svg></div>}</td>
         <td className="px-3 py-3 text-sm font-semibold text-slate-700">{d.brand||'—'}</td>
@@ -497,7 +507,7 @@ function Inventory(){
         <td className="px-3 py-3"><Pill tone={d.grade}>{d.grade}</Pill></td>
         <td className="px-3 py-3">{printTag(d.print_mark)}</td>
         <td className="px-3 py-3 font-mono text-sm">{d.size_label}</td>
-        <td className="px-3 py-3">{relTag(d.release_date)}</td>
+
         <td className="px-3 py-3 text-xs text-slate-400 max-w-[140px] truncate" title={d.last_filename}>{d.last_filename||'—'}</td>
         <td className="px-3 py-3 font-mono font-semibold text-sm text-right">{fmt(d.total_qty)}</td></tr>)}</tbody>
     </table></div>}
@@ -674,7 +684,7 @@ function ImportPage(){
     {stage==='batch_queue'&&<div>
       <div className="bg-indigo-50 border border-indigo-200 rounded-xl p-4 mb-4">
         <div className="font-semibold text-indigo-800 mb-1">📦 批量匯入 {queue.length} 個檔案</div>
-        <div className="text-sm text-indigo-700">系統將依序自動解析並入庫，解禁日請事後在總覽中補填。</div>
+        <div className="text-sm text-indigo-700">系統將依序自動解析並入庫。</div>
       </div>
       <div className="space-y-2 mb-4 max-h-64 overflow-auto">
         {queue.map((q,i)=><div key={i} className="flex items-center gap-3 text-sm px-3 py-2.5 bg-slate-50 rounded-lg flex-wrap">
@@ -721,7 +731,7 @@ function ImportPage(){
       <div className="grid grid-cols-2 md:grid-cols-3 gap-3 mb-4">
         <div><label className="text-xs font-semibold text-slate-500">品牌</label><input className={inpL} value={brand} onChange={e=>setBrand(e.target.value)}/></div>
         <div><label className="text-xs font-semibold text-slate-500">月份(淘汰月)</label><input className={inpL} value={period} onChange={e=>setPeriod(e.target.value)}/></div>
-        <div><label className="text-xs font-semibold text-slate-500">解禁日(可留空)</label><input type="date" className={inpL} value={release} onChange={e=>setRelease(e.target.value)}/></div>
+
       </div>
       <div className="flex items-center justify-between mb-2 flex-wrap gap-2">
         <div className="text-sm flex gap-3 flex-wrap">
@@ -763,7 +773,7 @@ function ImportPage(){
           <div><span className="text-slate-500">本批總量</span><div className="font-mono font-bold">{fmt(result.excel_total)}</div></div>
           <div><span className="text-slate-500">新增</span><div className="font-mono font-bold text-emerald-600">{fmt(result.new_items)}</div></div>
           <div><span className="text-slate-500">覆蓋</span><div className="font-mono font-bold text-indigo-600">{fmt(result.covered)}</div></div>
-          <div><span className="text-slate-500">解禁日</span><div className="font-mono font-bold">{result.release_date||'未設定'}</div></div>
+
           <div><span className="text-slate-500">抽圖</span><div className="font-mono font-bold text-violet-600">{Object.keys(imgMap).length} 款</div></div>
         </div>
       </div>
@@ -788,7 +798,7 @@ function Move(){
     sb.from('v_batches').select('*').then(({data})=>setBatches(data||[]));
   },[]);
   const load=async()=>{try{
-    const {data,error}=await sb.from('v_inventory').select('product_size_id,size_label,total_qty,style_no,part,color_desc,grade,brand,print_mark,release_date,last_period,image_url,last_filename').order('total_qty',{ascending:false}).limit(500);
+    const {data,error}=await sb.from('v_inventory').select('product_size_id,size_label,total_qty,style_no,part,color_desc,grade,brand,print_mark,last_period,image_url,last_filename').order('total_qty',{ascending:false}).limit(500);
     if(error)throw error;
     let list=(data||[]);
     if(brand)list=list.filter(r=>r.brand===brand);
@@ -808,9 +818,17 @@ function Move(){
     try{
       if(modal.action==='OUT'){const {data,error}=await sb.rpc('rpc_stock_out',{p_product_size_id:modal.row.product_size_id,p_qty:n,p_note:note||null});if(error)throw error;showMsg(`出庫成功 · 剩餘 ${data}`,true);}
       else{const {data,error}=await sb.rpc('rpc_stock_in',{p_product_size_id:modal.row.product_size_id,p_qty:n,p_note:note||null});if(error)throw error;showMsg(`入庫成功 · 現有 ${data}`,true);}
-      setModal(null);load();sb.from('v_batches').select('*').then(({data})=>setBatches(data||[]));
+      setModal(null);
+      await refreshAll();
     }catch(e){showMsg(e.message,false);}
     setBusy(false);
+  };
+  const refreshAll=async()=>{
+    // 延遲 300ms 讓資料庫視圖確實更新後再拉
+    await new Promise(r=>setTimeout(r,300));
+    await load();
+    const {data:bd}=await sb.from('v_batches').select('*').limit(10000);
+    setBatches(bd||[]);
   };
   const doBatchOut=async()=>{
     setBusy(true);
@@ -818,7 +836,8 @@ function Move(){
       const {data,error}=await sb.rpc('rpc_batch_out',{p_batch_id:batchModal.id,p_note:'整批出庫 '+batchModal.brand+' '+batchModal.period});
       if(error)throw error;
       showMsg(`整批出庫成功 · ${data.out_items}項 ${fmt(data.out_qty)}件`,true);
-      setBatchModal(null);load();sb.from('v_batches').select('*').then(({data})=>setBatches(data||[]));
+      setBatchModal(null);
+      await refreshAll();
     }catch(e){showMsg(e.message,false);}
     setBusy(false);
   };
@@ -833,7 +852,7 @@ function Move(){
       <div className="flex flex-wrap gap-2">{batches.filter(b=>b.total_qty>0).length?batches.filter(b=>b.total_qty>0).map((b,i)=>
         <button key={i} onClick={()=>setBatchModal(b)} className="px-3 py-2 rounded-xl border border-slate-200 hover:border-rose-300 hover:bg-rose-50 text-sm text-left">
           <div className="font-semibold text-slate-700">{b.brand} · {b.period}</div>
-          <div className="text-xs text-slate-400">{fmt(b.total_qty)}件 {b.release_date&&b.release_date>today?'· 保留至'+b.release_date:''}</div>
+          <div className="text-xs text-slate-400">{fmt(b.total_qty)}件</div>
         </button>):<span className="text-sm text-slate-400">尚無可出庫批次</span>}</div>
     </Card>
     <Card className="overflow-hidden">
@@ -856,7 +875,7 @@ function Move(){
     {brandMgmt&&<div className="px-4 md:px-6 py-3 border-b border-slate-100 bg-slate-50/50"><div className="text-xs font-semibold text-slate-400 mb-2">點擊品牌名稱可重新命名</div><div className="flex flex-wrap gap-2">{brands.map(b=><div key={b} className="flex items-center gap-1.5">{editingBrand===b?<><input autoFocus value={newBrandName} onChange={e=>setNewBrandName(e.target.value)} onKeyDown={e=>e.key==='Enter'&&renameBrand(b,newBrandName)} className="text-xs border border-indigo-300 rounded-lg px-2 py-1 w-28 outline-none"/><button onClick={()=>renameBrand(b,newBrandName)} className="text-xs text-indigo-600 font-semibold">確認</button><button onClick={()=>setEditingBrand(null)} className="text-xs text-slate-400">取消</button></>:<button onClick={()=>{setEditingBrand(b);setNewBrandName(b);}} className="text-xs bg-white hover:bg-indigo-50 text-slate-700 px-3 py-1.5 rounded-lg font-semibold border border-slate-200">✏ {b}</button>}</div>)}</div></div>}
     {err&&!modal&&!batchModal?<ErrBox msg={err}/>:!rows?<Loading/>:
     <div className="overflow-auto" style={{maxHeight:480}}><table className="w-full">
-      <thead className="bg-slate-50/80 sticky top-0"><tr>{['圖','品牌','月份','款號','顏色','尺碼','等級','印花','解禁','現有','操作'].map((h,i)=><th key={h} className={`px-3 py-3 text-xs font-semibold text-slate-400 ${i>=9?'text-right':'text-left'}`}>{h}</th>)}</tr></thead>
+      <thead className="bg-slate-50/80 sticky top-0"><tr>{['圖','品牌','月份','款號','顏色','尺碼','等級','印花','現有','操作'].map((h,i)=><th key={h} className={`px-3 py-3 text-xs font-semibold text-slate-400 ${i>=8?'text-right':'text-left'}`}>{h}</th>)}</tr></thead>
       <tbody className="divide-y divide-slate-50">{rows.map((d,i)=><tr key={i} className="hover:bg-slate-50">
         <td className="px-2 py-2 w-14">{d.image_url?<img src={d.image_url} className="w-11 h-11 object-cover rounded-lg" alt="" loading="lazy"/>:<div className="w-11 h-11 rounded-lg bg-slate-100 flex items-center justify-center text-slate-300 text-[10px]">無圖</div>}</td>
         <td className="px-3 py-3 text-sm">{d.brand||'—'}</td>
@@ -866,7 +885,7 @@ function Move(){
         <td className="px-3 py-3 font-mono text-sm">{d.size_label}</td>
         <td className="px-3 py-3"><Pill tone={d.grade}>{d.grade}</Pill></td>
         <td className="px-3 py-3">{printTag(d.print_mark)}</td>
-        <td className="px-3 py-3">{relTag(d.release_date)}</td>
+
         <td className={`px-3 py-3 font-mono font-semibold text-sm text-right ${d.total_qty<=5?'text-rose-500':''}`}>{fmt(d.total_qty)}</td>
         <td className="px-3 py-3 text-right whitespace-nowrap">
           <button onClick={()=>openModal(d,'IN')} className="px-2.5 py-1.5 rounded-lg bg-emerald-50 text-emerald-700 hover:bg-emerald-100 text-sm font-semibold mr-1.5">入</button>
@@ -878,7 +897,7 @@ function Move(){
     <Card className="w-full max-w-md p-6"><div onClick={e=>e.stopPropagation()}>
       <h3 className="font-display font-bold text-lg mb-1">{modal.action==='OUT'?'出庫':'入庫'}登記</h3>
       <div className="text-sm text-slate-500 mb-4 font-mono">{modal.row.style_no}{modal.row.part?'/'+modal.row.part:''} · {modal.row.size_label} · 現有 {fmt(modal.row.total_qty)}</div>
-      {modal.action==='OUT'&&modal.row.release_date&&modal.row.release_date>today&&<div className="mb-4 text-sm text-rose-600 bg-rose-50 rounded-lg px-3 py-2">⚠ 此批保留至 {modal.row.release_date}。仍可出庫,請留意。</div>}
+
       <label className="block text-sm font-semibold text-slate-600 mb-1.5">數量</label>
       <input autoFocus type="number" min="1" value={qty} onChange={e=>setQty(e.target.value)} onKeyDown={e=>e.key==='Enter'&&submit()} className={sel+" w-full mb-4 font-mono"} placeholder="輸入數量"/>
       <label className="block text-sm font-semibold text-slate-600 mb-1.5">備註(選填)</label>
@@ -893,7 +912,7 @@ function Move(){
     <Card className="w-full max-w-md p-6"><div onClick={e=>e.stopPropagation()}>
       <h3 className="font-display font-bold text-lg mb-1">整批出庫</h3>
       <div className="text-sm text-slate-600 mb-3">{batchModal.brand} · {batchModal.period} · 來源檔 <span className="font-mono text-xs">{batchModal.filename}</span></div>
-      <div className="bg-amber-50 border border-amber-200 rounded-lg px-3 py-2 text-sm text-amber-700 mb-4">將把這批目前所有庫存(約 {fmt(batchModal.total_qty)} 件)一次出清,此動作會產生出庫紀錄。{batchModal.release_date&&batchModal.release_date>today?' 注意:此批保留至'+batchModal.release_date+'。':''}</div>
+      <div className="bg-amber-50 border border-amber-200 rounded-lg px-3 py-2 text-sm text-amber-700 mb-4">將把這批目前所有庫存(約 {fmt(batchModal.total_qty)} 件)一次出清,此動作會產生出庫紀錄。</div>
       <div className="flex gap-3">
         <button onClick={()=>setBatchModal(null)} disabled={busy} className="px-5 py-2.5 rounded-xl bg-slate-100 text-slate-600 font-semibold text-sm">取消</button>
         <button onClick={doBatchOut} disabled={busy} className="flex-1 bg-rose-600 hover:bg-rose-700 text-white font-semibold py-2.5 rounded-xl disabled:opacity-60 flex items-center justify-center gap-2">{busy&&<Spinner/>}確認整批出庫</button>
