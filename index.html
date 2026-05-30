@@ -311,7 +311,16 @@ function Inventory(){
   const [rows,setRows]=useState(null),[err,setErr]=useState(""),[grade,setGrade]=useState(''),[brand,setBrand]=useState(''),[print,setPrint]=useState(''),[q,setQ]=useState(''),[fileq,setFileq]=useState('');
   const [brandMgmt,setBrandMgmt]=useState(false),[editingBrand,setEditingBrand]=useState(null),[newBrandName,setNewBrandName]=useState("");
   const [brands,setBrands]=useState([]),[zoom,setZoom]=useState(null),[exporting,setExporting]=useState(false);
-  useEffect(()=>{sb.from('v_stock_by_brand').select('brand').then(({data})=>setBrands((data||[]).map(b=>b.brand).filter(Boolean)));},[]);
+  const [files,setFiles]=useState([]);
+  const [exportMenu,setExportMenu]=useState(false);
+  useEffect(()=>{
+    sb.from('v_stock_by_brand').select('brand').then(({data})=>setBrands((data||[]).map(b=>b.brand).filter(Boolean)));
+    // 拿還有庫存的批次檔名清單
+    sb.from('v_batches').select('filename,period,total_qty').gt('total_qty',0).limit(500).then(({data})=>{
+      const uniq=[...new Set((data||[]).map(b=>b.filename).filter(Boolean))].sort();
+      setFiles(uniq);
+    });
+  },[]);
   const renameBrand=async(on,nn)=>{if(!nn.trim()||nn===on)return;try{await sb.from('brands').update({name:nn}).eq('name',on);await sb.from('import_batches').update({brand:nn}).eq('brand',on);setEditingBrand(null);setNewBrandName("");sb.from('v_stock_by_brand').select('brand').then(({data})=>setBrands((data||[]).map(b=>b.brand).filter(Boolean)));setRows(null);}catch(e){alert('更新失敗:'+e.message);}};
   useEffect(()=>{const t=setTimeout(async()=>{setRows(null);
     try{
@@ -323,7 +332,7 @@ function Inventory(){
       if(print==='Y')list=list.filter(r=>/有/.test(r.print_mark||''));
       else if(print==='N')list=list.filter(r=>/無/.test(r.print_mark||''));
       if(q){const k=q.toLowerCase();list=list.filter(r=>(r.style_no||'').toLowerCase().includes(k)||(r.color_desc||'').toLowerCase().includes(k)||(r.color_code||'').toLowerCase().includes(k));}
-      if(fileq){const k=fileq.toLowerCase();list=list.filter(r=>(r.last_filename||'').toLowerCase().includes(k));}
+      if(fileq)list=list.filter(r=>r.last_filename===fileq);
       setRows(list);
     }catch(e){setErr(e.message);}
   },300);return()=>clearTimeout(t);},[grade,brand,print,q,fileq]);
@@ -344,7 +353,16 @@ function Inventory(){
     }catch(e){alert('導出失敗:'+e.message);}
     setExporting(false);
   };
-  const exportPDF=async(data)=>{
+  const exportPDF=async(rawData,mode)=>{
+    let data=rawData;
+    if(mode==='group'){
+      // 分組排序:依 款號→色號→顏色→等級
+      data=[...rawData].sort((a,b)=>{
+        const ka=(a.style_no||'')+'|'+(a.color_code||'')+'|'+(a.color_desc||'')+'|'+(a.grade||'');
+        const kb=(b.style_no||'')+'|'+(b.color_code||'')+'|'+(b.color_desc||'')+'|'+(b.grade||'');
+        return ka.localeCompare(kb);
+      });
+    }
     if(!data||!data.length){alert('沒有資料可導出');return;}
     if(!window.html2canvas||!window.jspdf){
       alert('PDF 函式庫尚未載入,請重新整理頁面');return;
@@ -388,7 +406,7 @@ function Inventory(){
       const totB=data.filter(d=>d.grade==='B').reduce((s,d)=>s+(d.total_qty||0),0);
       const tot=data.reduce((s,d)=>s+(d.total_qty||0),0);
       let h='<div style="font-size:22px;font-weight:bold;margin-bottom:6px;color:#0f172a">StockSense 庫存報表</div>';
-      h+='<div style="font-size:12px;color:#64748b;margin-bottom:14px">導出時間: '+new Date().toLocaleString('zh-TW')+' &nbsp;|&nbsp; 共 '+data.length+' 筆 &nbsp;|&nbsp; <span style="color:#059669;font-weight:600">A 品 '+totA+'</span> / <span style="color:#d97706;font-weight:600">B 品 '+totB+'</span> / <span style="font-weight:700">總 '+tot+' 件</span></div>';
+      h+='<div style="font-size:12px;color:#64748b;margin-bottom:14px">導出時間: '+new Date().toLocaleString('zh-TW')+' &nbsp;|&nbsp; 共 '+data.length+' 筆 &nbsp;|&nbsp; <span style="color:#059669;font-weight:600">A 品 '+totA+'</span> / <span style="color:#d97706;font-weight:600">B 品 '+totB+'</span> / <span style="font-weight:700">總 '+tot+' 件</span>'+(mode==='group'?' &nbsp;|&nbsp; <span style="color:#6366f1;font-weight:600">分組排序(款號→色號→等級)</span>':'')+'</div>';
       h+='<table style="width:100%;border-collapse:collapse;font-size:11px"><thead><tr style="background:#f1f5f9">';
       ['圖片','品牌','款號','色號','顏色','等級','印花','尺碼','件數'].forEach(t=>{h+='<th style="padding:8px;text-align:left;font-weight:700;border:1px solid #cbd5e1;color:#0f172a">'+t+'</th>';});
       h+='</tr></thead><tbody>';
@@ -483,7 +501,7 @@ function Inventory(){
       <select className={sel} value={grade} onChange={e=>setGrade(e.target.value)}><option value="">A/B 品</option><option value="A">A 品</option><option value="B">B 品</option></select>
       <select className={sel} value={print} onChange={e=>setPrint(e.target.value)}><option value="">印花不限</option><option value="Y">有印花</option><option value="N">無印花</option></select>
       <input className={sel+" flex-1 min-w-[130px]"} placeholder="搜尋款號/顏色…" value={q} onChange={e=>setQ(e.target.value)}/>
-      <input className={sel+" flex-1 min-w-[130px]"} placeholder="依檔名篩選…" value={fileq} onChange={e=>setFileq(e.target.value)}/>
+      <select className={sel+" max-w-[260px]"} value={fileq} onChange={e=>setFileq(e.target.value)}><option value="">全部來源檔</option>{files.map(f=><option key={f} value={f} title={f}>{f.length>30?f.slice(0,29)+'…':f}</option>)}</select>
       {rows&&<>
         <Pill tone="indigo">{fmt(rows.length)} 列</Pill>
         <Pill tone="A">A品 {fmt(rows.filter(r=>r.grade==='A').reduce((s,r)=>s+(r.total_qty||0),0))}</Pill>
@@ -491,7 +509,13 @@ function Inventory(){
         <Pill tone="slate">總 {fmt(rows.reduce((s,r)=>s+(r.total_qty||0),0))} 件</Pill>
       </>}
       <button onClick={()=>exportExcel(rows)} disabled={exporting||!rows||!rows.length} className="px-3 py-2 rounded-xl bg-emerald-600 text-white text-sm font-semibold disabled:opacity-40">⬇ Excel</button>
-      <button onClick={()=>exportPDF(rows)} disabled={exporting||!rows||!rows.length} className="px-3 py-2 rounded-xl bg-rose-600 text-white text-sm font-semibold disabled:opacity-40">⬇ PDF</button>
+      <div className="relative inline-block">
+        <button onClick={()=>setExportMenu(!exportMenu)} disabled={exporting||!rows||!rows.length} className="px-3 py-2 rounded-xl bg-rose-600 text-white text-sm font-semibold disabled:opacity-40">⬇ PDF ▾</button>
+        {exportMenu&&<div className="absolute right-0 top-full mt-1 bg-white border border-slate-200 rounded-xl shadow-lg z-50 min-w-[200px] py-1">
+          <button onClick={()=>{setExportMenu(false);exportPDF(rows,'default');}} className="w-full text-left px-4 py-2 text-sm hover:bg-slate-50">標準排序(依數量)</button>
+          <button onClick={()=>{setExportMenu(false);exportPDF(rows,'group');}} className="w-full text-left px-4 py-2 text-sm hover:bg-slate-50">分組(款號→色號→等級)</button>
+        </div>}
+      </div>
     </div>
     {brandMgmt&&<div className="px-4 md:px-6 py-3 border-b border-slate-100 bg-slate-50/50"><div className="text-xs font-semibold text-slate-400 mb-2">點擊品牌名稱可重新命名</div><div className="flex flex-wrap gap-2">{brands.map(b=><div key={b} className="flex items-center gap-1.5">{editingBrand===b?<><input autoFocus value={newBrandName} onChange={e=>setNewBrandName(e.target.value)} onKeyDown={e=>e.key==='Enter'&&renameBrand(b,newBrandName)} className="text-xs border border-indigo-300 rounded-lg px-2 py-1 w-28 outline-none"/><button onClick={()=>renameBrand(b,newBrandName)} className="text-xs text-indigo-600 font-semibold">確認</button><button onClick={()=>setEditingBrand(null)} className="text-xs text-slate-400">取消</button></>:<button onClick={()=>{setEditingBrand(b);setNewBrandName(b);}} className="text-xs bg-white hover:bg-indigo-50 text-slate-700 px-3 py-1.5 rounded-lg font-semibold border border-slate-200">✏ {b}</button>}</div>)}</div></div>}
     {err?<ErrBox msg={err}/>:!rows?<Loading/>:rows.length===0?<Empty msg="無符合資料"/>:
@@ -806,7 +830,7 @@ function Move(){
     if(print==='Y')list=list.filter(r=>/有/.test(r.print_mark||''));
     else if(print==='N')list=list.filter(r=>/無/.test(r.print_mark||''));
     if(q){const k=q.toLowerCase();list=list.filter(r=>(r.style_no||'').toLowerCase().includes(k)||(r.color_desc||'').toLowerCase().includes(k));}
-    if(fileq){const k=fileq.toLowerCase();list=list.filter(r=>(r.last_filename||'').toLowerCase().includes(k));}
+    if(fileq)list=list.filter(r=>r.last_filename===fileq);
     setRows(list);
   }catch(e){setErr(e.message);}};
   useEffect(()=>{const t=setTimeout(load,300);return()=>clearTimeout(t);},[q,brand,print,fileq,grade]);
@@ -864,7 +888,7 @@ function Move(){
       <select className={sel} value={grade} onChange={e=>setGrade(e.target.value)}><option value="">A/B 品</option><option value="A">A 品</option><option value="B">B 品</option></select>
       <select className={sel} value={print} onChange={e=>setPrint(e.target.value)}><option value="">印花不限</option><option value="Y">有印花</option><option value="N">無印花</option></select>
       <input className={sel+" flex-1 min-w-[140px]"} placeholder="搜尋款號/顏色…" value={q} onChange={e=>setQ(e.target.value)}/>
-      <input className={sel+" flex-1 min-w-[140px]"} placeholder="依來源檔篩選…" value={fileq} onChange={e=>setFileq(e.target.value)}/>
+      <select className={sel+" max-w-[260px]"} value={fileq} onChange={e=>setFileq(e.target.value)}><option value="">全部來源檔</option>{[...new Set(batches.filter(b=>(b.total_qty||0)>0).map(b=>b.filename).filter(Boolean))].sort().map(f=><option key={f} value={f} title={f}>{f.length>30?f.slice(0,29)+'…':f}</option>)}</select>
       {rows&&<>
         <Pill tone="indigo">{fmt(rows.length)} 列</Pill>
         <Pill tone="A">A品 {fmt(rows.filter(r=>r.grade==='A').reduce((s,r)=>s+(r.total_qty||0),0))}</Pill>
