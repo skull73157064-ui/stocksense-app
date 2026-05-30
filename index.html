@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<!-- build 0529-1430 --><title>StockSense · 成衣倉儲管理</title>
+<!-- build 0530-0131 --><title>StockSense · 成衣倉儲管理</title>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js" crossorigin></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js" crossorigin></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.23.2/babel.min.js"></script>
@@ -329,63 +329,52 @@ function Inventory(){
   };
   const exportPDF=async(data)=>{
     if(!data||!data.length){alert('沒有資料可導出');return;}
-    if(!window.html2pdf){alert('PDF 函式庫尚未載入,請重新整理頁面');return;}
+    if(!window.html2canvas||!window.jspdf){
+      // html2pdf.bundle 載入後會掛上 window.html2canvas 和 window.jspdf
+      alert('PDF 函式庫尚未載入,請重新整理頁面');return;
+    }
     setExporting(true);
-    // 進度提示
     const overlay=document.createElement('div');
-    overlay.id='__pdf_overlay__';
     overlay.style.cssText='position:fixed;inset:0;background:rgba(15,23,42,0.7);z-index:99999;display:flex;align-items:center;justify-content:center;';
     overlay.innerHTML='<div style="background:#fff;padding:24px 32px;border-radius:14px;box-shadow:0 10px 40px rgba(0,0,0,0.3);font-family:sans-serif;min-width:280px;text-align:center"><div style="font-size:15px;font-weight:600;color:#1e293b;margin-bottom:8px">產生 PDF 中</div><div id="__pdf_prog__" style="font-size:13px;color:#64748b">準備中…</div></div>';
     document.body.appendChild(overlay);
     const setProg=(t)=>{const el=document.getElementById('__pdf_prog__');if(el)el.textContent=t;};
     let container=null;
     try{
-      // === 第一步:把所有圖片預先抓回來轉成 base64 (徹底解決 CORS 問題) ===
+      // === 步驟1:把圖片預載成 base64 ===
       const urls=[...new Set(data.filter(d=>d.image_url).map(d=>d.image_url))];
-      setProg('載入 0/'+urls.length+' 張圖片…');
       const cache={};
       let done=0;
+      setProg('載入 0/'+urls.length+' 張圖片…');
       await Promise.all(urls.map(async url=>{
         try{
           const r=await fetch(url);
           if(!r.ok)throw new Error('http '+r.status);
           const blob=await r.blob();
-          const dataUrl=await new Promise((res,rej)=>{
+          cache[url]=await new Promise((res,rej)=>{
             const fr=new FileReader();
             fr.onload=()=>res(fr.result);
-            fr.onerror=()=>rej(new Error('FileReader fail'));
+            fr.onerror=()=>rej(new Error('fr fail'));
             fr.readAsDataURL(blob);
           });
-          cache[url]=dataUrl;
-        }catch(e){
-          console.warn('圖片載入失敗:',url,e);
-          cache[url]=null;
-        }
-        done++;
-        setProg('載入 '+done+'/'+urls.length+' 張圖片…');
+        }catch(e){console.warn('圖片載入失敗:',url,e.message);cache[url]=null;}
+        done++;setProg('載入 '+done+'/'+urls.length+' 張圖片…');
       }));
-      // === 第二步:在頁面建立 PDF 容器(可見,opacity 1,放在最上層後面層,使用者看到 overlay 蓋住) ===
+      console.log('[PDF] 圖片載入完成, 成功:',Object.values(cache).filter(v=>v).length,'/',urls.length);
+      
+      // === 步驟2:建立 PDF 內容容器(放在頁面上,被 overlay 蓋住) ===
       setProg('排版中…');
       container=document.createElement('div');
       container.id='__pdf_container__';
-      container.style.cssText='position:fixed;left:0;top:0;width:1240px;background:#ffffff;padding:24px;font-family:"Microsoft JhengHei","Noto Sans TC","PingFang TC","Heiti TC",sans-serif;color:#0f172a;z-index:1;line-height:1.5;';
+      container.style.cssText='position:fixed;left:0;top:0;width:1240px;background:#ffffff;padding:24px;font-family:"Microsoft JhengHei","Noto Sans TC","PingFang TC","Heiti TC",sans-serif;color:#0f172a;z-index:1;line-height:1.5;box-sizing:border-box;';
       const esc=(s)=>String(s==null?'':s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
       const totA=data.filter(d=>d.grade==='A').reduce((s,d)=>s+(d.total_qty||0),0);
       const totB=data.filter(d=>d.grade==='B').reduce((s,d)=>s+(d.total_qty||0),0);
       const tot=data.reduce((s,d)=>s+(d.total_qty||0),0);
-      let h='';
-      h+='<div style="font-size:22px;font-weight:bold;margin-bottom:6px;color:#0f172a">StockSense 庫存報表</div>';
-      h+='<div style="font-size:12px;color:#64748b;margin-bottom:14px">';
-      h+='導出時間: '+new Date().toLocaleString('zh-TW')+' &nbsp;|&nbsp; 共 '+data.length+' 筆 &nbsp;|&nbsp; ';
-      h+='<span style="color:#059669;font-weight:600">A 品 '+totA+'</span> / ';
-      h+='<span style="color:#d97706;font-weight:600">B 品 '+totB+'</span> / ';
-      h+='<span style="font-weight:700">總 '+tot+' 件</span>';
-      h+='</div>';
-      h+='<table style="width:100%;border-collapse:collapse;font-size:11px">';
-      h+='<thead><tr style="background:#f1f5f9">';
-      ['圖片','品牌','款號','色號','顏色','等級','印花','尺碼','件數'].forEach(t=>{
-        h+='<th style="padding:8px;text-align:left;font-weight:700;border:1px solid #cbd5e1;color:#0f172a">'+t+'</th>';
-      });
+      let h='<div style="font-size:22px;font-weight:bold;margin-bottom:6px;color:#0f172a">StockSense 庫存報表</div>';
+      h+='<div style="font-size:12px;color:#64748b;margin-bottom:14px">導出時間: '+new Date().toLocaleString('zh-TW')+' &nbsp;|&nbsp; 共 '+data.length+' 筆 &nbsp;|&nbsp; <span style="color:#059669;font-weight:600">A 品 '+totA+'</span> / <span style="color:#d97706;font-weight:600">B 品 '+totB+'</span> / <span style="font-weight:700">總 '+tot+' 件</span></div>';
+      h+='<table style="width:100%;border-collapse:collapse;font-size:11px"><thead><tr style="background:#f1f5f9">';
+      ['圖片','品牌','款號','色號','顏色','等級','印花','尺碼','件數'].forEach(t=>{h+='<th style="padding:8px;text-align:left;font-weight:700;border:1px solid #cbd5e1;color:#0f172a">'+t+'</th>';});
       h+='</tr></thead><tbody>';
       data.forEach(d=>{
         h+='<tr>';
@@ -408,23 +397,64 @@ function Inventory(){
       h+='</tbody></table>';
       container.innerHTML=h;
       document.body.appendChild(container);
-      // 給瀏覽器一點時間完成佈局
       await new Promise(r=>setTimeout(r,500));
-      // === 第三步:html2pdf 截圖 ===
+      
+      // 確認容器有實際尺寸
+      const rect=container.getBoundingClientRect();
+      console.log('[PDF] container 尺寸:',rect.width,'x',rect.height);
+      if(rect.width<50||rect.height<50)throw new Error('PDF 容器渲染失敗(尺寸過小)');
+      
+      // === 步驟3:用 html2canvas 截圖 ===
+      setProg('截圖中…');
+      const canvas=await window.html2canvas(container,{
+        scale:1.5,
+        useCORS:false,
+        allowTaint:false,
+        backgroundColor:'#ffffff',
+        logging:false,
+        width:container.offsetWidth,
+        height:container.offsetHeight,
+        windowWidth:container.offsetWidth,
+        scrollY:-window.scrollY
+      });
+      console.log('[PDF] canvas 尺寸:',canvas.width,'x',canvas.height);
+      
+      // === 步驟4:用 jsPDF 嵌入 canvas 並儲存 ===
       setProg('產生 PDF 中…');
-      await window.html2pdf().set({
-        margin:8,
-        filename:'StockSense_庫存_'+new Date().toISOString().slice(0,10)+'.pdf',
-        image:{type:'jpeg',quality:0.92},
-        html2canvas:{scale:1.5,useCORS:false,allowTaint:false,backgroundColor:'#ffffff',logging:false,width:1240,windowWidth:1240,scrollY:0},
-        jsPDF:{unit:'mm',format:'a3',orientation:'landscape',compress:true},
-        pagebreak:{mode:['css','legacy']}
-      }).from(container).save();
+      const {jsPDF}=window.jspdf;
+      const pdf=new jsPDF({unit:'mm',format:'a3',orientation:'landscape',compress:true});
+      const pageW=pdf.internal.pageSize.getWidth();
+      const pageH=pdf.internal.pageSize.getHeight();
+      const margin=8;
+      const usableW=pageW-margin*2;
+      const usableH=pageH-margin*2;
+      // 把 canvas 等比縮放到 usableW
+      const imgW=usableW;
+      const imgH=canvas.height*(imgW/canvas.width);
+      const imgData=canvas.toDataURL('image/jpeg',0.92);
+      // 多頁處理
+      if(imgH<=usableH){
+        pdf.addImage(imgData,'JPEG',margin,margin,imgW,imgH);
+      }else{
+        // 圖片高過一頁,分頁切割
+        let yOffset=0;
+        while(yOffset<imgH){
+          if(yOffset>0)pdf.addPage();
+          pdf.addImage(imgData,'JPEG',margin,margin-yOffset,imgW,imgH);
+          // 蓋住超出頁面的部分(用白色矩形)
+          if(yOffset+usableH<imgH){
+            pdf.setFillColor(255,255,255);
+            pdf.rect(0,pageH-margin,pageW,margin,'F');
+          }
+          yOffset+=usableH;
+        }
+      }
+      pdf.save('StockSense_庫存_'+new Date().toISOString().slice(0,10)+'.pdf');
+      console.log('[PDF] 完成');
     }catch(e){
-      console.error('PDF 錯誤:',e);
+      console.error('[PDF] 錯誤:',e);
       alert('PDF 導出失敗: '+(e.message||e));
     }
-    // 清理
     if(container&&container.parentNode)container.parentNode.removeChild(container);
     if(overlay.parentNode)overlay.parentNode.removeChild(overlay);
     setExporting(false);
@@ -506,9 +536,53 @@ function ImportPage(){
     e.target.value="";
     if(!files.length)return;
     if(files.length===1){processFile(files[0]);return;}
-    // 批量模式
-    const q=files.map(f=>({file:f,status:'pending',result:null,error:null}));
-    setQueue(q);setStage('batch_queue');
+    // 批量模式:先建初始 queue 進入畫面
+    setBusy(true);
+    const initQ=files.map(f=>({file:f,status:'parsing',result:null,error:null,imgStatus:'抽圖中…'}));
+    setQueue(initQ);setStage('batch_queue');
+    // 並行:每個檔案立即解析(算 A/B/總件數) + 背景抽圖
+    const q=[...initQ];
+    await Promise.all(files.map(async(f,i)=>{
+      // 解析 Excel
+      try{
+        const buf=await f.arrayBuffer();
+        const r=window.parseCartersWorkbook(buf,f.name);
+        if(!r.length)throw new Error("解析不到資料");
+        r.forEach(x=>{const p=x.print_mark||"";x.print_mark=/有|印|绣|繡|花/.test(p)&&!/無|无/.test(p)?"有印花繡花":(/無|无/.test(p)?"無印花繡花":"");});
+        const clean=r.filter(x=>x.style_no&&parseInt(x.qty)>0).map(x=>({...x,qty:parseInt(x.qty)}));
+        q[i]={...q[i],
+          status:'pending',
+          parsed:clean,
+          parsedBrand:window.brandFromFilename(f.name),
+          parsedPeriod:window.periodFromFilename(f.name),
+          totalQty:clean.reduce((s,x)=>s+x.qty,0),
+          qtyA:clean.filter(x=>x.grade==='A').reduce((s,x)=>s+x.qty,0),
+          qtyB:clean.filter(x=>x.grade==='B').reduce((s,x)=>s+x.qty,0)
+        };
+        setQueue([...q]);
+      }catch(ex){
+        q[i]={...q[i],status:'error',error:ex.message,imgStatus:null};
+        setQueue([...q]);
+        return;
+      }
+      // 背景抽圖(獨立非同步,使用者可同時看 A/B/總件數)
+      (async()=>{try{
+        const session=await sb.auth.getSession();const token=session?.data?.session?.access_token;
+        if(!token){q[i].imgStatus='無法抽圖';setQueue([...q]);return;}
+        const fd=new FormData();fd.append('file',f);
+        const res=await fetch(`${window.CONFIG.BACKEND_URL}/extract`,{method:'POST',headers:{Authorization:`Bearer ${token}`},body:fd});
+        if(res.ok){
+          const d=await res.json();
+          if(d.ok&&d.results){
+            for(const rx of d.results){if(rx.image_url)await sb.from('products').update({image_url:rx.image_url}).eq('style_no',rx.style_no).is('image_url',null);}
+            q[i].imgStatus=`已抽圖 ${d.uploaded}/${d.extracted} 張`;
+            q[i].imgResults=d.results;
+          }else{q[i].imgStatus='抽圖回應異常';}
+        }else{q[i].imgStatus='抽圖失敗';}
+      }catch(e){q[i].imgStatus='抽圖失敗';}
+      setQueue([...q]);})();
+    }));
+    setBusy(false);
   };
 
   const extractImages=async(f)=>{
@@ -533,7 +607,7 @@ function ImportPage(){
     setExtracting(false);
   };
 
-  // 批量處理:逐一自動匯入不需核對
+  // 批量處理:onFiles 已解析好 parsed/qtyA/qtyB,這裡只負責寫入資料庫
   const runBatch=async()=>{
     setBusy(true);
     const updated=[...queue];
@@ -542,34 +616,11 @@ function ImportPage(){
       updated[i].status='processing';setQueue([...updated]);
       try{
         const f=updated[i].file;
-        const buf=await f.arrayBuffer();
-        const r=window.parseCartersWorkbook(buf,f.name);
-        if(!r.length)throw new Error("解析不到資料");
-        r.forEach(x=>{const p=x.print_mark||"";x.print_mark=/有|印|绣|繡|花/.test(p)&&!/無|无/.test(p)?"有印花繡花":(/無|无/.test(p)?"無印花繡花":"");});
-        const b=window.brandFromFilename(f.name);
-        const p=window.periodFromFilename(f.name);
-        const clean=r.filter(x=>x.style_no&&parseInt(x.qty)>0).map(x=>({...x,qty:parseInt(x.qty),brand:b}));
-        const totalQty=clean.reduce((s,x)=>s+x.qty,0);
-        const qtyA=clean.filter(x=>x.grade==='A').reduce((s,x)=>s+x.qty,0);
-        const qtyB=clean.filter(x=>x.grade==='B').reduce((s,x)=>s+x.qty,0);
-        const {data,error}=await sb.rpc('rpc_import_commit',{p_filename:f.name,p_brand:b,p_period:p,p_release_date:null,p_records:clean,p_expected_total:totalQty});
+        const clean=(updated[i].parsed||[]).map(x=>({...x,brand:updated[i].parsedBrand}));
+        if(!clean.length)throw new Error("無有效資料");
+        const {data,error}=await sb.rpc('rpc_import_commit',{p_filename:f.name,p_brand:updated[i].parsedBrand,p_period:updated[i].parsedPeriod,p_release_date:null,p_records:clean,p_expected_total:updated[i].totalQty});
         if(error)throw error;
-        updated[i]={...updated[i],status:'done',result:data,totalQty,qtyA,qtyB,imgStatus:'抽圖中…'};
-        setQueue([...updated]);
-        // 背景抽圖,完成後更新 imgStatus
-        ((idx)=>{(async()=>{try{
-          const session=await sb.auth.getSession();const token=session?.data?.session?.access_token;
-          if(!token){updated[idx].imgStatus='無法抽圖';setQueue([...updated]);return;}
-          const fd=new FormData();fd.append('file',f);
-          const res=await fetch(`${window.CONFIG.BACKEND_URL}/extract`,{method:'POST',headers:{Authorization:`Bearer ${token}`},body:fd});
-          if(res.ok){const d=await res.json();
-            if(d.ok&&d.results){
-              for(const rx of d.results){if(rx.image_url)await sb.from('products').update({image_url:rx.image_url}).eq('style_no',rx.style_no).is('image_url',null);}
-              updated[idx].imgStatus=`已抽圖 ${d.uploaded}/${d.extracted} 張`;
-            }else{updated[idx].imgStatus='抽圖回應異常';}
-          }else{updated[idx].imgStatus='抽圖失敗';}
-        }catch(e){updated[idx].imgStatus='抽圖失敗';}
-        setQueue([...updated]);})();})(i);
+        updated[i]={...updated[i],status:'done',result:data};
       }catch(ex){updated[i]={...updated[i],status:'error',error:ex.message};}
       setQueue([...updated]);
     }
@@ -620,13 +671,13 @@ function ImportPage(){
         <div className="text-sm text-indigo-700">系統將依序自動解析並入庫，解禁日請事後在總覽中補填。</div>
       </div>
       <div className="space-y-2 mb-4 max-h-64 overflow-auto">
-        {queue.map((q,i)=><div key={i} className="flex items-center gap-3 text-sm px-3 py-2 bg-slate-50 rounded-lg">
-          <span className={`text-xs px-2 py-0.5 rounded font-semibold shrink-0 ${q.status==='done'?'bg-emerald-100 text-emerald-700':q.status==='error'?'bg-rose-100 text-rose-600':q.status==='processing'?'bg-indigo-100 text-indigo-700':'bg-slate-200 text-slate-500'}`}>{q.status==='done'?'完成':q.status==='error'?'失敗':q.status==='processing'?'處理中':'待處理'}</span>
-          <span className="flex-1 truncate font-mono text-xs">{q.file.name}</span>
-          {q.totalQty!=null&&<span className="text-xs text-slate-600 shrink-0">總 {fmt(q.totalQty)}件</span>}
-          {q.qtyA>0&&<span className="text-xs text-emerald-600 shrink-0 font-semibold">A品 {fmt(q.qtyA)}</span>}
-          {q.qtyB>0&&<span className="text-xs text-amber-600 shrink-0 font-semibold">B品 {fmt(q.qtyB)}</span>}
-          {q.imgStatus&&<span className={`text-xs shrink-0 font-semibold ${q.imgStatus.startsWith('已抽')?'text-violet-600':q.imgStatus==='抽圖中…'?'text-indigo-500':'text-slate-400'}`}>{q.imgStatus}</span>}
+        {queue.map((q,i)=><div key={i} className="flex items-center gap-3 text-sm px-3 py-2.5 bg-slate-50 rounded-lg flex-wrap">
+          <span className={`text-xs px-2 py-0.5 rounded font-semibold shrink-0 ${q.status==='done'?'bg-emerald-100 text-emerald-700':q.status==='error'?'bg-rose-100 text-rose-600':q.status==='processing'?'bg-indigo-100 text-indigo-700':q.status==='parsing'?'bg-amber-100 text-amber-700':'bg-slate-200 text-slate-500'}`}>{q.status==='done'?'完成':q.status==='error'?'失敗':q.status==='processing'?'處理中':q.status==='parsing'?'解析中…':'待處理'}</span>
+          <span className="flex-1 truncate font-mono text-xs min-w-[140px]">{q.file.name}</span>
+          {q.totalQty!=null&&<span className="text-xs text-slate-700 shrink-0 font-semibold">總 {fmt(q.totalQty)}件</span>}
+          {q.qtyA>0&&<span className="text-xs text-emerald-600 shrink-0 font-semibold bg-emerald-50 px-2 py-0.5 rounded">A品 {fmt(q.qtyA)}</span>}
+          {q.qtyB>0&&<span className="text-xs text-amber-600 shrink-0 font-semibold bg-amber-50 px-2 py-0.5 rounded">B品 {fmt(q.qtyB)}</span>}
+          {q.imgStatus&&<span className={`text-xs shrink-0 font-semibold px-2 py-0.5 rounded ${q.imgStatus.startsWith('已抽')?'text-violet-700 bg-violet-50':q.imgStatus==='抽圖中…'?'text-indigo-600 bg-indigo-50':'text-slate-400 bg-slate-100'}`}>{q.imgStatus}</span>}
           {q.error&&<span className="text-xs text-rose-500 truncate max-w-[160px]">{q.error}</span>}
         </div>)}
       </div>
@@ -637,10 +688,20 @@ function ImportPage(){
     </div>}
 
     {stage==='batch_done'&&<div>
-      <div className="bg-emerald-50 rounded-xl p-5 mb-4">
-        <div className="font-semibold text-emerald-800 mb-3">✅ 批量匯入完成</div>
-        <div className="text-sm text-slate-600">成功 {queue.filter(q=>q.status==='done').length} 個 / 失敗 {queue.filter(q=>q.status==='error').length} 個</div>
-        {queue.filter(q=>q.status==='error').map((q,i)=><div key={i} className="text-xs text-rose-500 mt-1">{q.file.name}: {q.error}</div>)}
+      <div className="bg-emerald-50 border border-emerald-200 rounded-xl p-4 mb-4">
+        <div className="font-semibold text-emerald-800 mb-1">✅ 批量匯入完成</div>
+        <div className="text-sm text-emerald-700">成功 {queue.filter(q=>q.status==='done').length} 個 / 失敗 {queue.filter(q=>q.status==='error').length} 個 · 抽圖在背景進行,需等待數秒至數十秒</div>
+      </div>
+      <div className="space-y-2 mb-4 max-h-96 overflow-auto">
+        {queue.map((q,i)=><div key={i} className="flex items-center gap-3 text-sm px-3 py-2.5 bg-slate-50 rounded-lg flex-wrap">
+          <span className={`text-xs px-2 py-0.5 rounded font-semibold shrink-0 ${q.status==='done'?'bg-emerald-100 text-emerald-700':q.status==='error'?'bg-rose-100 text-rose-600':'bg-slate-200 text-slate-500'}`}>{q.status==='done'?'完成':q.status==='error'?'失敗':'處理中'}</span>
+          <span className="flex-1 truncate font-mono text-xs min-w-[140px]">{q.file.name}</span>
+          {q.totalQty!=null&&<span className="text-xs text-slate-700 shrink-0 font-semibold">總 {fmt(q.totalQty)}件</span>}
+          {q.qtyA>0&&<span className="text-xs text-emerald-600 shrink-0 font-semibold bg-emerald-50 px-2 py-0.5 rounded">A品 {fmt(q.qtyA)}</span>}
+          {q.qtyB>0&&<span className="text-xs text-amber-600 shrink-0 font-semibold bg-amber-50 px-2 py-0.5 rounded">B品 {fmt(q.qtyB)}</span>}
+          {q.imgStatus&&<span className={`text-xs shrink-0 font-semibold px-2 py-0.5 rounded ${q.imgStatus.startsWith('已抽')?'text-violet-700 bg-violet-50':q.imgStatus==='抽圖中…'?'text-indigo-600 bg-indigo-50':'text-slate-400 bg-slate-100'}`}>{q.imgStatus}</span>}
+          {q.error&&<span className="text-xs text-rose-500 truncate max-w-[260px]">{q.error}</span>}
+        </div>)}
       </div>
       <button onClick={reset} className="w-full bg-slate-900 text-white font-semibold py-2.5 rounded-xl">再上傳檔案</button>
     </div>}
