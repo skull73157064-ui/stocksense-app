@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<!-- build 0530-0131 --><title>StockSense · 成衣倉儲管理</title>
+<title>StockSense · 成衣倉儲管理</title>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js" crossorigin></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js" crossorigin></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.23.2/babel.min.js"></script>
@@ -20,7 +20,8 @@
   .spin{animation:spin 1s linear infinite}@keyframes spin{to{transform:rotate(360deg)}}
   .font-display{font-family:'Sora',sans-serif}.font-mono{font-family:'JetBrains Mono',monospace}
 </style>
-<script src="https://cdnjs.cloudflare.com/ajax/libs/html2pdf.js/0.10.1/html2pdf.bundle.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/html2canvas/1.4.1/html2canvas.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
 </head>
 <body class="text-slate-900 antialiased">
@@ -225,11 +226,17 @@ function Overview(){
   useEffect(()=>{(async()=>{
     try{
       const {data:bb,error:e1}=await sb.from('v_stock_by_brand').select('*');if(e1)throw e1;
-      const {data:ps,error:e2}=await sb.from('product_sizes').select('total_qty');if(e2)throw e2;
-      const {data:pg,error:e3}=await sb.from('products').select('grade,product_sizes(total_qty)');if(e3)throw e3;
+      // 改用查詢 v_inventory 計算 A/B 品 (跟庫存查詢頁面用同一份視圖,確保數字一致)
+      const {data:inv,error:e2}=await sb.from('v_inventory').select('grade,total_qty');if(e2)throw e2;
       const {data:batches,error:e4}=await sb.from('v_batches').select('*');if(e4)throw e4;
-      const total=(ps||[]).reduce((s,r)=>s+r.total_qty,0);
-      let A=0,B=0;(pg||[]).forEach(p=>{const q=(p.product_sizes||[]).reduce((s,x)=>s+x.total_qty,0);if(p.grade==='A')A+=q;else B+=q;});
+      // 加總邏輯:用 v_stock_by_brand 的加總,確保跟「各品牌庫存」一致
+      const total=(bb||[]).reduce((s,r)=>s+(r.total_qty||0),0);
+      let A=0,B=0;
+      (inv||[]).forEach(r=>{
+        const q=r.total_qty||0;
+        if(r.grade==='A')A+=q;
+        else if(r.grade==='B')B+=q;
+      });
       setD({byBrand:(bb||[]).map(r=>({name:r.brand,value:r.total_qty,styles:r.style_count})).sort((a,b)=>b.value-a.value),
         total,A,B,batches:batches||[]});
     }catch(e){setErr(e.message);}
@@ -330,7 +337,6 @@ function Inventory(){
   const exportPDF=async(data)=>{
     if(!data||!data.length){alert('沒有資料可導出');return;}
     if(!window.html2canvas||!window.jspdf){
-      // html2pdf.bundle 載入後會掛上 window.html2canvas 和 window.jspdf
       alert('PDF 函式庫尚未載入,請重新整理頁面');return;
     }
     setExporting(true);
