@@ -356,8 +356,27 @@ function Inventory(){
   const exportPDF=async(rawData,mode)=>{
     let data=rawData;
     if(mode==='group'){
-      // 分組排序:依 款號→色號→顏色→等級
-      data=[...rawData].sort((a,b)=>{
+      // 分組合併:同款號+同色號+同顏色+同等級 合併成一筆(所有尺碼加總)
+      const groups={};
+      rawData.forEach(r=>{
+        const k=(r.style_no||'')+'|'+(r.part||'')+'|'+(r.color_code||'')+'|'+(r.color_desc||'')+'|'+(r.grade||'');
+        if(!groups[k]){
+          groups[k]={
+            style_no:r.style_no,part:r.part,color_code:r.color_code,color_desc:r.color_desc,
+            grade:r.grade,brand:r.brand,print_mark:r.print_mark,image_url:r.image_url,
+            total_qty:0,size_label:'(全尺碼)',_sizes:[]
+          };
+        }
+        groups[k].total_qty+=(r.total_qty||0);
+        if(r.size_label&&!groups[k]._sizes.includes(r.size_label))groups[k]._sizes.push(r.size_label);
+      });
+      data=Object.values(groups).map(g=>{
+        // 把尺碼清單放進 size_label 顯示,例如 「XS/S/M/L (4 碼)」
+        if(g._sizes.length>0){
+          g.size_label=g._sizes.length<=4?g._sizes.join('/'):g._sizes.length+'碼';
+        }
+        return g;
+      }).sort((a,b)=>{
         const ka=(a.style_no||'')+'|'+(a.color_code||'')+'|'+(a.color_desc||'')+'|'+(a.grade||'');
         const kb=(b.style_no||'')+'|'+(b.color_code||'')+'|'+(b.color_desc||'')+'|'+(b.grade||'');
         return ka.localeCompare(kb);
