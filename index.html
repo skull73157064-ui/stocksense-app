@@ -187,6 +187,20 @@
 const {useState,useEffect,useMemo}=React;
 const fmt=n=>(n??0).toLocaleString('en-US');
 const sb=window.supabase.createClient(window.CONFIG.SUPABASE_URL,window.CONFIG.SUPABASE_ANON);
+// 用 range 分頁拿全部資料,繞過 PostgREST 1000 筆預設限制
+async function fetchAllRange(buildQuery,pageSize=1000){
+  let all=[];let from=0;
+  while(true){
+    const {data,error}=await buildQuery().range(from,from+pageSize-1);
+    if(error)throw error;
+    if(!data||data.length===0)break;
+    all=all.concat(data);
+    if(data.length<pageSize)break;
+    from+=pageSize;
+    if(from>50000)break; // 安全上限
+  }
+  return all;
+}
 
 const Pill=({children,tone})=>{const m={A:'bg-emerald-100 text-emerald-700',B:'bg-amber-100 text-amber-700',indigo:'bg-indigo-100 text-indigo-700',slate:'bg-slate-100 text-slate-600'};return <span className={`inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-semibold ${m[tone]||m.slate}`}>{children}</span>;};
 const Card=({children,className=''})=><div className={`bg-white rounded-2xl border border-slate-100 shadow-sm ${className}`}>{children}</div>;
@@ -306,6 +320,67 @@ function Overview(){
 }
 
 
+// ===== 匯出預覽 Modal =====
+function ExportPreviewModal({format,mode,rows,buildExportData,onChangeMode,onCancel,onConfirm,exporting}){
+  const data=buildExportData(rows,mode);
+  const totA=data.filter(d=>d.grade==='A').reduce((s,d)=>s+(d.total_qty||0),0);
+  const totB=data.filter(d=>d.grade==='B').reduce((s,d)=>s+(d.total_qty||0),0);
+  const tot=data.reduce((s,d)=>s+(d.total_qty||0),0);
+  const preview=data.slice(0,15);
+  const remaining=data.length-preview.length;
+  const isPDF=format==='pdf';
+  return <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4" onClick={onCancel}>
+    <Card className="w-full max-w-5xl max-h-[90vh] flex flex-col">
+      <div onClick={e=>e.stopPropagation()} className="flex flex-col h-full overflow-hidden">
+        <div className="px-6 py-4 border-b border-slate-100 flex items-center justify-between">
+          <div>
+            <h3 className="font-display font-bold text-lg">匯出 {isPDF?'PDF':'Excel'} 預覽</h3>
+            <div className="text-xs text-slate-500 mt-0.5">確認資料正確再下載</div>
+          </div>
+          <button onClick={onCancel} className="text-slate-400 hover:text-slate-600 text-xl px-2">✕</button>
+        </div>
+        <div className="px-6 py-3 border-b border-slate-100 bg-slate-50/60 flex flex-wrap gap-3 items-center text-sm">
+          <span className="font-semibold text-slate-600">統計:</span>
+          <span className="bg-indigo-100 text-indigo-700 px-2.5 py-0.5 rounded-full text-xs font-semibold">{fmt(data.length)} 列</span>
+          <span className="bg-emerald-100 text-emerald-700 px-2.5 py-0.5 rounded-full text-xs font-semibold">A 品 {fmt(totA)}</span>
+          <span className="bg-amber-100 text-amber-700 px-2.5 py-0.5 rounded-full text-xs font-semibold">B 品 {fmt(totB)}</span>
+          <span className="bg-slate-200 text-slate-700 px-2.5 py-0.5 rounded-full text-xs font-semibold">總 {fmt(tot)} 件</span>
+        </div>
+        <div className="px-6 py-3 border-b border-slate-100 flex flex-wrap gap-3 items-center">
+          <span className="text-sm font-semibold text-slate-600">排列方式:</span>
+          <button onClick={()=>onChangeMode('default')} className={`px-3 py-1.5 rounded-lg text-xs font-semibold ${mode==='default'?'bg-indigo-600 text-white':'bg-slate-100 text-slate-600 hover:bg-slate-200'}`}>標準(依數量)</button>
+          <button onClick={()=>onChangeMode('group')} className={`px-3 py-1.5 rounded-lg text-xs font-semibold ${mode==='group'?'bg-indigo-600 text-white':'bg-slate-100 text-slate-600 hover:bg-slate-200'}`}>分組(款號→色號→等級,合併尺碼)</button>
+        </div>
+        <div className="flex-1 overflow-auto px-6 py-3">
+          <div className="text-xs text-slate-500 mb-2">預覽前 {preview.length} 列{remaining>0?' (後續還有 '+fmt(remaining)+' 列未顯示,實際匯出包含全部)':''}</div>
+          <table className="w-full text-xs border-collapse">
+            <thead className="bg-slate-50 sticky top-0"><tr>
+              {['圖','品牌','款號','色號','顏色','等級','印花','尺碼','件數'].map(h=><th key={h} className="px-2 py-1.5 text-left font-semibold text-slate-500 border-b border-slate-200">{h}</th>)}
+            </tr></thead>
+            <tbody>{preview.map((d,i)=><tr key={i} className="border-b border-slate-100">
+              <td className="px-2 py-1">{d.image_url?<img src={d.image_url} className="w-8 h-8 object-cover rounded" alt=""/>:<div className="w-8 h-8 bg-slate-100 rounded flex items-center justify-center text-[9px] text-slate-300">無</div>}</td>
+              <td className="px-2 py-1">{d.brand||'—'}</td>
+              <td className="px-2 py-1 font-mono">{d.style_no}{d.part?'/'+d.part:''}</td>
+              <td className="px-2 py-1 font-mono">{d.color_code}</td>
+              <td className="px-2 py-1">{d.color_desc}</td>
+              <td className="px-2 py-1">{d.grade}</td>
+              <td className="px-2 py-1">{d.print_mark}</td>
+              <td className="px-2 py-1 font-mono">{d.size_label}</td>
+              <td className="px-2 py-1 font-mono font-semibold text-right">{fmt(d.total_qty||0)}</td>
+            </tr>)}</tbody>
+          </table>
+        </div>
+        <div className="px-6 py-4 border-t border-slate-100 flex gap-3 bg-white">
+          <button onClick={onCancel} disabled={exporting} className="px-5 py-2.5 rounded-xl bg-slate-100 text-slate-600 font-semibold text-sm">取消</button>
+          <button onClick={onConfirm} disabled={exporting||data.length===0} className={`flex-1 ${isPDF?'bg-rose-600 hover:bg-rose-700':'bg-emerald-600 hover:bg-emerald-700'} text-white font-semibold py-2.5 rounded-xl disabled:opacity-60 flex items-center justify-center gap-2`}>
+            {exporting&&<Spinner/>}確認下載 {isPDF?'PDF':'Excel'} ({fmt(data.length)} 列 / {fmt(tot)} 件)
+          </button>
+        </div>
+      </div>
+    </Card>
+  </div>;
+}
+
 // ===== 庫存查詢(品牌/等級/檔名篩選)=====
 function Inventory(){
   const [rows,setRows]=useState(null),[err,setErr]=useState(""),[grade,setGrade]=useState(''),[brand,setBrand]=useState(''),[print,setPrint]=useState(''),[q,setQ]=useState(''),[fileq,setFileq]=useState('');
@@ -324,8 +399,8 @@ function Inventory(){
   const renameBrand=async(on,nn)=>{if(!nn.trim()||nn===on)return;try{await sb.from('brands').update({name:nn}).eq('name',on);await sb.from('import_batches').update({brand:nn}).eq('brand',on);setEditingBrand(null);setNewBrandName("");sb.from('v_stock_by_brand').select('brand').then(({data})=>setBrands((data||[]).map(b=>b.brand).filter(Boolean)));setRows(null);}catch(e){alert('更新失敗:'+e.message);}};
   useEffect(()=>{const t=setTimeout(async()=>{setRows(null);
     try{
-      const {data,error}=await sb.from('v_inventory').select('*').gt('total_qty',0).order('total_qty',{ascending:false}).limit(800);
-      if(error)throw error;
+      const data=await fetchAllRange(()=>sb.from('v_inventory').select('*').gt('total_qty',0).order('total_qty',{ascending:false}));
+      console.log('[Inventory] 拿到',data.length,'筆,加總',data.reduce((s,r)=>s+(r.total_qty||0),0),'件');
       let list=(data||[]);
       if(grade)list=list.filter(r=>r.grade===grade);
       if(brand)list=list.filter(r=>r.brand===brand);
@@ -556,6 +631,7 @@ function Inventory(){
     </table></div>}
   </Card>
   {zoom&&<div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-6" onClick={()=>setZoom(null)}><img src={zoom} className="max-w-full max-h-full rounded-xl" alt=""/></div>}
+  {previewModal&&rows&&<ExportPreviewModal format={previewModal.format} mode={previewModal.mode} rows={rows} buildExportData={buildExportData} onChangeMode={(m)=>setPreviewModal({...previewModal,mode:m})} onCancel={()=>setPreviewModal(null)} onConfirm={()=>{const fmt=previewModal.format;const mode=previewModal.mode;setPreviewModal(null);if(fmt==='excel')exportExcel(rows,mode);else exportPDF(rows,mode);}} exporting={exporting}/>}
   </div>;
 }
 
@@ -841,8 +917,8 @@ function Move(){
     sb.from('v_batches').select('*').then(({data})=>setBatches(data||[]));
   },[]);
   const load=async()=>{try{
-    const {data,error}=await sb.from('v_inventory').select('product_size_id,size_label,total_qty,style_no,part,color_desc,grade,brand,print_mark,last_period,image_url,last_filename').order('total_qty',{ascending:false}).limit(500);
-    if(error)throw error;
+    const data=await fetchAllRange(()=>sb.from('v_inventory').select('product_size_id,size_label,total_qty,style_no,part,color_desc,grade,brand,print_mark,last_period,image_url,last_filename').gt('total_qty',0).order('total_qty',{ascending:false}));
+    console.log('[Move] 拿到',data.length,'筆,加總',data.reduce((s,r)=>s+(r.total_qty||0),0),'件');
     let list=(data||[]);
     if(brand)list=list.filter(r=>r.brand===brand);
     if(grade)list=list.filter(r=>r.grade===grade);
