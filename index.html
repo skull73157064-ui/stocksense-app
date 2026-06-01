@@ -388,6 +388,7 @@ function Inventory(){
   const [brands,setBrands]=useState([]),[zoom,setZoom]=useState(null),[exporting,setExporting]=useState(false);
   const [files,setFiles]=useState([]);
   const [exportMenu,setExportMenu]=useState(false);
+  const [previewModal,setPreviewModal]=useState(null);
   useEffect(()=>{
     sb.from('v_stock_by_brand').select('brand').then(({data})=>setBrands((data||[]).map(b=>b.brand).filter(Boolean)));
     // 拿還有庫存的批次檔名清單
