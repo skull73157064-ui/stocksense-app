@@ -389,6 +389,8 @@ function Inventory(){
   const [files,setFiles]=useState([]);
   const [exportMenu,setExportMenu]=useState(false);
   const [previewModal,setPreviewModal]=useState(null);
+  const [page,setPage]=useState(1);
+  const PAGE_SIZE=50;
   useEffect(()=>{
     sb.from('v_stock_by_brand').select('brand').then(({data})=>setBrands((data||[]).map(b=>b.brand).filter(Boolean)));
     // 拿還有庫存的批次檔名清單
@@ -409,7 +411,7 @@ function Inventory(){
       else if(print==='N')list=list.filter(r=>/無/.test(r.print_mark||''));
       if(q){const k=q.toLowerCase();list=list.filter(r=>(r.style_no||'').toLowerCase().includes(k)||(r.color_desc||'').toLowerCase().includes(k)||(r.color_code||'').toLowerCase().includes(k));}
       if(fileq)list=list.filter(r=>r.last_filename===fileq);
-      setRows(list);
+      setRows(list);setPage(1);
     }catch(e){setErr(e.message);}
   },300);return()=>clearTimeout(t);},[grade,brand,print,q,fileq]);
   const sel="bg-white border border-slate-200 text-sm rounded-xl px-4 py-2.5 font-medium focus:ring-2 focus:ring-indigo-100 outline-none";
@@ -620,10 +622,10 @@ function Inventory(){
     </div>
     {brandMgmt&&<div className="px-4 md:px-6 py-3 border-b border-slate-100 bg-slate-50/50"><div className="text-xs font-semibold text-slate-400 mb-2">點擊品牌名稱可重新命名</div><div className="flex flex-wrap gap-2">{brands.map(b=><div key={b} className="flex items-center gap-1.5">{editingBrand===b?<><input autoFocus value={newBrandName} onChange={e=>setNewBrandName(e.target.value)} onKeyDown={e=>e.key==='Enter'&&renameBrand(b,newBrandName)} className="text-xs border border-indigo-300 rounded-lg px-2 py-1 w-28 outline-none"/><button onClick={()=>renameBrand(b,newBrandName)} className="text-xs text-indigo-600 font-semibold">確認</button><button onClick={()=>setEditingBrand(null)} className="text-xs text-slate-400">取消</button></>:<button onClick={()=>{setEditingBrand(b);setNewBrandName(b);}} className="text-xs bg-white hover:bg-indigo-50 text-slate-700 px-3 py-1.5 rounded-lg font-semibold border border-slate-200">✏ {b}</button>}</div>)}</div></div>}
     {err?<ErrBox msg={err}/>:!rows?<Loading/>:rows.length===0?<Empty msg="無符合資料"/>:
-    <div className="overflow-auto" style={{maxHeight:540}}><table className="w-full">
+    <><div className="overflow-auto" style={{maxHeight:540}}><table className="w-full">
       <thead className="bg-slate-50/80 sticky top-0"><tr>{['圖片','品牌','款號','色號','顏色','產品線','等級','印花','尺碼','來源檔','件數'].map((h,i)=><th key={h} className={`px-3 py-3 text-xs font-semibold text-slate-400 uppercase ${i===10?'text-right':'text-left'}`}>{h}</th>)}</tr></thead>
-      <tbody className="divide-y divide-slate-50">{rows.map((d,i)=><tr key={i} className="hover:bg-slate-50">
-        <td className="px-3 py-2">{d.image_url?<img src={d.image_url} alt="" className="w-12 h-12 object-cover rounded-lg cursor-pointer" onClick={()=>setZoom(d.image_url)}/>:<div className="w-12 h-12 rounded-lg bg-slate-100 flex items-center justify-center"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#cbd5e1" strokeWidth="2"><rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="8.5" cy="8.5" r="1.5"/><path d="M21 15l-5-5L5 21"/></svg></div>}</td>
+      <tbody className="divide-y divide-slate-50">{rows.slice((page-1)*PAGE_SIZE,page*PAGE_SIZE).map((d,i)=><tr key={(page-1)*PAGE_SIZE+i} className="hover:bg-slate-50">
+        <td className="px-3 py-2">{d.image_url?<img src={d.image_url} loading="lazy" alt="" className="w-12 h-12 object-cover rounded-lg cursor-pointer" onClick={()=>setZoom(d.image_url)}/>:<div className="w-12 h-12 rounded-lg bg-slate-100 flex items-center justify-center"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#cbd5e1" strokeWidth="2"><rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="8.5" cy="8.5" r="1.5"/><path d="M21 15l-5-5L5 21"/></svg></div>}</td>
         <td className="px-3 py-3 text-sm font-semibold text-slate-700">{d.brand||'—'}</td>
         <td className="px-3 py-3 font-mono font-semibold text-sm">{d.style_no}{d.part?<span className="text-slate-400">/{d.part}</span>:''}</td>
         <td className="px-3 py-3 font-mono text-sm text-indigo-600">{d.color_code}</td>
@@ -635,7 +637,18 @@ function Inventory(){
 
         <td className="px-3 py-3 text-xs text-slate-400 max-w-[140px] truncate" title={d.last_filename}>{d.last_filename||'—'}</td>
         <td className="px-3 py-3 font-mono font-semibold text-sm text-right">{fmt(d.total_qty)}</td></tr>)}</tbody>
-    </table></div>}
+    </table></div>
+    {rows.length>PAGE_SIZE&&<div className="flex items-center justify-between px-4 py-3 border-t border-slate-100 bg-slate-50/40">
+      <div className="text-xs text-slate-500">第 <span className="font-semibold text-slate-700">{(page-1)*PAGE_SIZE+1}</span>–<span className="font-semibold text-slate-700">{Math.min(page*PAGE_SIZE,rows.length)}</span> 列 / 共 <span className="font-semibold text-slate-700">{fmt(rows.length)}</span> 列</div>
+      <div className="flex items-center gap-1">
+        <button onClick={()=>setPage(1)} disabled={page===1} className="px-2.5 py-1 rounded-lg bg-white border border-slate-200 text-xs font-semibold text-slate-600 disabled:opacity-30 hover:bg-slate-50">«</button>
+        <button onClick={()=>setPage(p=>Math.max(1,p-1))} disabled={page===1} className="px-2.5 py-1 rounded-lg bg-white border border-slate-200 text-xs font-semibold text-slate-600 disabled:opacity-30 hover:bg-slate-50">‹ 上一頁</button>
+        <span className="px-3 py-1 text-xs font-semibold text-slate-700">{page} / {Math.ceil(rows.length/PAGE_SIZE)}</span>
+        <button onClick={()=>setPage(p=>Math.min(Math.ceil(rows.length/PAGE_SIZE),p+1))} disabled={page>=Math.ceil(rows.length/PAGE_SIZE)} className="px-2.5 py-1 rounded-lg bg-white border border-slate-200 text-xs font-semibold text-slate-600 disabled:opacity-30 hover:bg-slate-50">下一頁 ›</button>
+        <button onClick={()=>setPage(Math.ceil(rows.length/PAGE_SIZE))} disabled={page>=Math.ceil(rows.length/PAGE_SIZE)} className="px-2.5 py-1 rounded-lg bg-white border border-slate-200 text-xs font-semibold text-slate-600 disabled:opacity-30 hover:bg-slate-50">»</button>
+      </div>
+    </div>}
+    </>}
   </Card>
   {zoom&&<div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-6" onClick={()=>setZoom(null)}><img src={zoom} className="max-w-full max-h-full rounded-xl" alt=""/></div>}
   {previewModal&&rows&&<ExportPreviewModal format={previewModal.format} mode={previewModal.mode} rows={rows} buildExportData={buildExportData} onChangeMode={(m)=>setPreviewModal({...previewModal,mode:m})} onCancel={()=>setPreviewModal(null)} onConfirm={()=>{const fmt=previewModal.format;const mode=previewModal.mode;setPreviewModal(null);if(fmt==='excel')exportExcel(rows,mode);else exportPDF(rows,mode);}} exporting={exporting}/>}
@@ -825,7 +838,7 @@ function ImportPage(){
       </div>
       <div className="flex gap-3">
         <button onClick={reset} className="px-5 py-2.5 rounded-xl bg-slate-100 text-slate-600 font-semibold text-sm">取消</button>
-        <button onClick={runBatch} disabled={busy} className="flex-1 bg-indigo-600 hover:bg-indigo-700 text-white font-semibold py-2.5 rounded-xl disabled:opacity-60 flex items-center justify-center gap-2">{busy&&<Spinner/>}開始批量匯入</button>
+        <button onClick={runBatch} disabled={busy||queue.some(q=>q.imgStatus==='抽圖中…')} className="flex-1 bg-indigo-600 hover:bg-indigo-700 text-white font-semibold py-2.5 rounded-xl disabled:opacity-60 flex items-center justify-center gap-2">{busy&&<Spinner/>}{queue.some(q=>q.imgStatus==='抽圖中…')?`等待抽圖完成 (${queue.filter(q=>q.imgStatus!=='抽圖中…').length}/${queue.length})`:'開始批量匯入'}</button>
       </div>
     </div>}
 
@@ -918,6 +931,8 @@ function Move(){
   const [modal,setModal]=useState(null),[qty,setQty]=useState(""),[note,setNote]=useState(""),[busy,setBusy]=useState(false);
   const [batchModal,setBatchModal]=useState(null); // 整批出庫
   const [brandMgmt,setBrandMgmt]=useState(false),[editingBrand,setEditingBrand]=useState(null),[newBrandName,setNewBrandName]=useState("");
+  const [page,setPage]=useState(1);
+  const PAGE_SIZE=50;
   const renameBrand=async(on,nn)=>{if(!nn.trim()||nn===on)return;try{await sb.from('brands').update({name:nn}).eq('name',on);await sb.from('import_batches').update({brand:nn}).eq('brand',on);setEditingBrand(null);setNewBrandName("");sb.from('v_stock_by_brand').select('brand').then(({data})=>setBrands((data||[]).map(b=>b.brand).filter(Boolean)));sb.from('v_batches').select('*').then(({data})=>setBatches(data||[]));load();}catch(e){alert('更新失敗:'+e.message);}};
   useEffect(()=>{
     sb.from('v_stock_by_brand').select('brand').then(({data})=>setBrands((data||[]).map(b=>b.brand).filter(Boolean)));
@@ -933,7 +948,7 @@ function Move(){
     else if(print==='N')list=list.filter(r=>/無/.test(r.print_mark||''));
     if(q){const k=q.toLowerCase();list=list.filter(r=>(r.style_no||'').toLowerCase().includes(k)||(r.color_desc||'').toLowerCase().includes(k));}
     if(fileq)list=list.filter(r=>r.last_filename===fileq);
-    setRows(list);
+    setRows(list);setPage(1);
   }catch(e){setErr(e.message);}};
   useEffect(()=>{const t=setTimeout(load,300);return()=>clearTimeout(t);},[q,brand,print,fileq,grade]);
   const showMsg=(m,ok)=>{setMsg({m,ok});setTimeout(()=>setMsg(null),3500);};
@@ -1000,9 +1015,9 @@ function Move(){
     </div>
     {brandMgmt&&<div className="px-4 md:px-6 py-3 border-b border-slate-100 bg-slate-50/50"><div className="text-xs font-semibold text-slate-400 mb-2">點擊品牌名稱可重新命名</div><div className="flex flex-wrap gap-2">{brands.map(b=><div key={b} className="flex items-center gap-1.5">{editingBrand===b?<><input autoFocus value={newBrandName} onChange={e=>setNewBrandName(e.target.value)} onKeyDown={e=>e.key==='Enter'&&renameBrand(b,newBrandName)} className="text-xs border border-indigo-300 rounded-lg px-2 py-1 w-28 outline-none"/><button onClick={()=>renameBrand(b,newBrandName)} className="text-xs text-indigo-600 font-semibold">確認</button><button onClick={()=>setEditingBrand(null)} className="text-xs text-slate-400">取消</button></>:<button onClick={()=>{setEditingBrand(b);setNewBrandName(b);}} className="text-xs bg-white hover:bg-indigo-50 text-slate-700 px-3 py-1.5 rounded-lg font-semibold border border-slate-200">✏ {b}</button>}</div>)}</div></div>}
     {err&&!modal&&!batchModal?<ErrBox msg={err}/>:!rows?<Loading/>:
-    <div className="overflow-auto" style={{maxHeight:480}}><table className="w-full">
+    <><div className="overflow-auto" style={{maxHeight:480}}><table className="w-full">
       <thead className="bg-slate-50/80 sticky top-0"><tr>{['圖','品牌','月份','款號','顏色','尺碼','等級','印花','現有','操作'].map((h,i)=><th key={h} className={`px-3 py-3 text-xs font-semibold text-slate-400 ${i>=8?'text-right':'text-left'}`}>{h}</th>)}</tr></thead>
-      <tbody className="divide-y divide-slate-50">{rows.map((d,i)=><tr key={i} className="hover:bg-slate-50">
+      <tbody className="divide-y divide-slate-50">{rows.slice((page-1)*PAGE_SIZE,page*PAGE_SIZE).map((d,i)=><tr key={(page-1)*PAGE_SIZE+i} className="hover:bg-slate-50">
         <td className="px-2 py-2 w-14">{d.image_url?<img src={d.image_url} className="w-11 h-11 object-cover rounded-lg" alt="" loading="lazy"/>:<div className="w-11 h-11 rounded-lg bg-slate-100 flex items-center justify-center text-slate-300 text-[10px]">無圖</div>}</td>
         <td className="px-3 py-3 text-sm">{d.brand||'—'}</td>
         <td className="px-3 py-3 font-mono text-xs text-slate-500">{d.last_period||'—'}</td>
@@ -1017,7 +1032,18 @@ function Move(){
           <button onClick={()=>openModal(d,'IN')} className="px-2.5 py-1.5 rounded-lg bg-emerald-50 text-emerald-700 hover:bg-emerald-100 text-sm font-semibold mr-1.5">入</button>
           <button onClick={()=>openModal(d,'OUT')} className="px-2.5 py-1.5 rounded-lg bg-rose-50 text-rose-600 hover:bg-rose-100 text-sm font-semibold">出</button>
         </td></tr>)}</tbody>
-    </table></div>}
+    </table></div>
+    {rows.length>PAGE_SIZE&&<div className="flex items-center justify-between px-4 py-3 border-t border-slate-100 bg-slate-50/40">
+      <div className="text-xs text-slate-500">第 <span className="font-semibold text-slate-700">{(page-1)*PAGE_SIZE+1}</span>–<span className="font-semibold text-slate-700">{Math.min(page*PAGE_SIZE,rows.length)}</span> 列 / 共 <span className="font-semibold text-slate-700">{fmt(rows.length)}</span> 列</div>
+      <div className="flex items-center gap-1">
+        <button onClick={()=>setPage(1)} disabled={page===1} className="px-2.5 py-1 rounded-lg bg-white border border-slate-200 text-xs font-semibold text-slate-600 disabled:opacity-30 hover:bg-slate-50">«</button>
+        <button onClick={()=>setPage(p=>Math.max(1,p-1))} disabled={page===1} className="px-2.5 py-1 rounded-lg bg-white border border-slate-200 text-xs font-semibold text-slate-600 disabled:opacity-30 hover:bg-slate-50">‹ 上一頁</button>
+        <span className="px-3 py-1 text-xs font-semibold text-slate-700">{page} / {Math.ceil(rows.length/PAGE_SIZE)}</span>
+        <button onClick={()=>setPage(p=>Math.min(Math.ceil(rows.length/PAGE_SIZE),p+1))} disabled={page>=Math.ceil(rows.length/PAGE_SIZE)} className="px-2.5 py-1 rounded-lg bg-white border border-slate-200 text-xs font-semibold text-slate-600 disabled:opacity-30 hover:bg-slate-50">下一頁 ›</button>
+        <button onClick={()=>setPage(Math.ceil(rows.length/PAGE_SIZE))} disabled={page>=Math.ceil(rows.length/PAGE_SIZE)} className="px-2.5 py-1 rounded-lg bg-white border border-slate-200 text-xs font-semibold text-slate-600 disabled:opacity-30 hover:bg-slate-50">»</button>
+      </div>
+    </div>}
+    </>}
     </Card>
   {modal&&<div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4" onClick={()=>!busy&&setModal(null)}>
     <Card className="w-full max-w-md p-6"><div onClick={e=>e.stopPropagation()}>
@@ -1175,18 +1201,20 @@ function History(){
 // ===== 款式照片管理(手動上傳,存 Supabase Storage)=====
 function Photos(){
   const [rows,setRows]=useState(null),[err,setErr]=useState(""),[q,setQ]=useState(''),[brand,setBrand]=useState(''),[onlyNo,setOnlyNo]=useState(false);
+  const [page,setPage]=useState(1);
+  const PAGE_SIZE=50;
   const [brands,setBrands]=useState([]),[msg,setMsg]=useState(null),[upId,setUpId]=useState(null);
   useEffect(()=>{sb.from('v_stock_by_brand').select('brand').then(({data})=>setBrands((data||[]).map(b=>b.brand).filter(Boolean)));},[]);
   const renameBrand=async(on,nn)=>{if(!nn.trim()||nn===on)return;try{await sb.from('brands').update({name:nn}).eq('name',on);await sb.from('import_batches').update({brand:nn}).eq('brand',on);setEditingBrand(null);setNewBrandName("");sb.from('v_stock_by_brand').select('brand').then(({data})=>setBrands((data||[]).map(b=>b.brand).filter(Boolean)));setRows(null);}catch(e){alert('更新失敗:'+e.message);}};
   const load=async()=>{try{
     // 以款式為單位(去重),取每款一筆
-    const {data,error}=await sb.from('products').select('id,style_no,part,color_code,color_desc,grade,print_mark,image_url,brand_lines(canonical,brands(name))').limit(1000);
-    if(error)throw error;
+    const data=await fetchAllRange(()=>sb.from('products').select('id,style_no,part,color_code,color_desc,grade,print_mark,image_url,brand_lines(canonical,brands(name))'));
+    console.log('[Photos] 拿到',data.length,'款');
     let list=(data||[]).map(p=>({id:p.id,style_no:p.style_no,part:p.part,color_code:p.color_code,color_desc:p.color_desc,grade:p.grade,print_mark:p.print_mark,image_url:p.image_url,brand_line:p.brand_lines?.canonical,brand:p.brand_lines?.brands?.name}));
     if(brand)list=list.filter(r=>r.brand===brand);
     if(onlyNo)list=list.filter(r=>!r.image_url);
     if(q){const k=q.toLowerCase();list=list.filter(r=>(r.style_no||'').toLowerCase().includes(k)||(r.color_desc||'').toLowerCase().includes(k));}
-    setRows(list);
+    setRows(list);setPage(1);
   }catch(e){setErr(e.message);}};
   useEffect(()=>{const t=setTimeout(load,300);return()=>clearTimeout(t);},[q,brand,onlyNo]);
   const showMsg=(m,ok)=>{setMsg({m,ok});setTimeout(()=>setMsg(null),3500);};
@@ -1257,10 +1285,10 @@ function Photos(){
       {batchLog.fails.length>0&&<div className="mt-1 text-xs text-slate-500">未配對:{batchLog.fails.join("、")}</div>}
     </div>}
     {err?<ErrBox msg={err}/>:!rows?<Loading/>:rows.length===0?<Empty msg="無款式"/>:
-    <div className="p-4 md:p-6 grid grid-cols-2 md:grid-cols-4 lg:grid-cols-5 gap-4" style={{maxHeight:560,overflow:'auto'}}>
-      {rows.map(d=><div key={d.id} className="border border-slate-100 rounded-xl overflow-hidden">
+    <><div className="p-4 md:p-6 grid grid-cols-2 md:grid-cols-4 lg:grid-cols-5 gap-4" style={{maxHeight:560,overflow:'auto'}}>
+      {rows.slice((page-1)*PAGE_SIZE,page*PAGE_SIZE).map(d=><div key={d.id} className="border border-slate-100 rounded-xl overflow-hidden">
         <div className="aspect-square bg-slate-50 flex items-center justify-center overflow-hidden">
-          {d.image_url?<img src={d.image_url} alt={d.style_no} className="w-full h-full object-cover"/>:
+          {d.image_url?<img src={d.image_url} alt={d.style_no} loading="lazy" className="w-full h-full object-cover"/>:
             <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="#cbd5e1" strokeWidth="1.5"><rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="8.5" cy="8.5" r="1.5"/><path d="M21 15l-5-5L5 21"/></svg>}
         </div>
         <div className="p-2.5">
@@ -1272,7 +1300,18 @@ function Photos(){
           </label>
         </div>
       </div>)}
+    </div>
+    {rows.length>PAGE_SIZE&&<div className="flex items-center justify-between px-4 py-3 border-t border-slate-100 bg-slate-50/40">
+      <div className="text-xs text-slate-500">第 <span className="font-semibold text-slate-700">{(page-1)*PAGE_SIZE+1}</span>–<span className="font-semibold text-slate-700">{Math.min(page*PAGE_SIZE,rows.length)}</span> 款 / 共 <span className="font-semibold text-slate-700">{fmt(rows.length)}</span> 款</div>
+      <div className="flex items-center gap-1">
+        <button onClick={()=>setPage(1)} disabled={page===1} className="px-2.5 py-1 rounded-lg bg-white border border-slate-200 text-xs font-semibold text-slate-600 disabled:opacity-30 hover:bg-slate-50">«</button>
+        <button onClick={()=>setPage(p=>Math.max(1,p-1))} disabled={page===1} className="px-2.5 py-1 rounded-lg bg-white border border-slate-200 text-xs font-semibold text-slate-600 disabled:opacity-30 hover:bg-slate-50">‹ 上一頁</button>
+        <span className="px-3 py-1 text-xs font-semibold text-slate-700">{page} / {Math.ceil(rows.length/PAGE_SIZE)}</span>
+        <button onClick={()=>setPage(p=>Math.min(Math.ceil(rows.length/PAGE_SIZE),p+1))} disabled={page>=Math.ceil(rows.length/PAGE_SIZE)} className="px-2.5 py-1 rounded-lg bg-white border border-slate-200 text-xs font-semibold text-slate-600 disabled:opacity-30 hover:bg-slate-50">下一頁 ›</button>
+        <button onClick={()=>setPage(Math.ceil(rows.length/PAGE_SIZE))} disabled={page>=Math.ceil(rows.length/PAGE_SIZE)} className="px-2.5 py-1 rounded-lg bg-white border border-slate-200 text-xs font-semibold text-slate-600 disabled:opacity-30 hover:bg-slate-50">»</button>
+      </div>
     </div>}
+    </>}
   </Card>
   {msg&&<div className={`fixed bottom-20 md:bottom-8 left-1/2 -translate-x-1/2 z-50 px-6 py-3.5 rounded-2xl text-sm font-semibold shadow-lg ${msg.ok?'bg-slate-900 text-white':'bg-rose-600 text-white'}`}>{msg.m}</div>}
   </div>;
